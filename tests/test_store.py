@@ -74,6 +74,33 @@ def test_indexed_repos_lists_distinct_repos(tmp_path: Path):
         assert store.indexed_repos() == ["repo-a", "repo-b"]
 
 
+def test_repo_status_maps_each_repo_to_its_last_indexed_at(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.replace_repo_chunks("repo-a", [_chunk("repo-a", "x.py", "x")], [[1.0]])
+        store.replace_repo_chunks("repo-b", [_chunk("repo-b", "y.py", "y")], [[1.0]])
+
+        status = store.repo_status()
+
+        assert set(status.keys()) == {"repo-a", "repo-b"}
+        assert all(isinstance(ts, str) and ts for ts in status.values())
+
+
+def test_repo_status_reflects_a_reindex_not_the_original_index_time(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.replace_repo_chunks("demo", [_chunk("demo", "a.py", "v1")], [[1.0]])
+        first = store.repo_status()["demo"]
+
+        store.replace_repo_chunks("demo", [_chunk("demo", "a.py", "v2")], [[1.0]])
+        second = store.repo_status()["demo"]
+
+        assert second >= first  # ISO 8601 timestamps sort lexicographically
+
+
+def test_repo_status_is_empty_when_nothing_is_indexed(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        assert store.repo_status() == {}
+
+
 def test_log_query_and_queries_since_count_recent_queries(tmp_path: Path):
     with Store(tmp_path / "index.db") as store:
         store.log_query("how does X work?", ["demo"], num_results=3, latency_ms=120)

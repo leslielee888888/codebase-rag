@@ -73,9 +73,42 @@ class CitationContentResponse(BaseModel):
     content: str
 
 
+class RepoOut(BaseModel):
+    name: str
+    path: str
+    indexed: bool
+    last_indexed_at: str | None = None
+
+
+class ReposResponse(BaseModel):
+    repos: list[RepoOut]
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/repos", response_model=ReposResponse)
+def repos() -> ReposResponse:
+    """Every configured repo, with whether it's indexed and (if so) when it
+    was last indexed (FR-4, T3)."""
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    status: dict[str, str] = {}
+    if DEFAULT_DB_PATH.exists():
+        with Store(DEFAULT_DB_PATH) as store:
+            status = store.repo_status()
+
+    return ReposResponse(
+        repos=[
+            RepoOut(name=r.name, path=r.path, indexed=r.name in status, last_indexed_at=status.get(r.name))
+            for r in config.repos
+        ]
+    )
 
 
 @app.get("/citation", response_model=CitationContentResponse)

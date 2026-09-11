@@ -122,6 +122,15 @@ class Store:
         rows = self._conn.execute("SELECT DISTINCT repo FROM chunks ORDER BY repo").fetchall()
         return [r[0] for r in rows]
 
+    def repo_status(self) -> dict[str, str]:
+        """Every indexed repo's most recent `indexed_at` (ISO 8601), as a
+        repo -> timestamp mapping (T3 of the dashboard PRD, FR-4). Every
+        chunk from one `replace_repo_chunks` call shares the same
+        `indexed_at`, so `MAX` here is just "this repo's last reindex",
+        not an aggregate over meaningfully different values."""
+        rows = self._conn.execute("SELECT repo, MAX(indexed_at) FROM chunks GROUP BY repo").fetchall()
+        return {repo: indexed_at for repo, indexed_at in rows}
+
     def search(
         self, query_vector: list[float], repos: list[str] | None = None, top_k: int = 8
     ) -> list[tuple[float, str, str, int, int, str]]:
