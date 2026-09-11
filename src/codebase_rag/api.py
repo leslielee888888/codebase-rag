@@ -19,6 +19,7 @@ from codebase_rag import answering
 from codebase_rag.config import ConfigError, load_config
 from codebase_rag.embeddings import EmbeddingClient, OllamaEmbeddingClient
 from codebase_rag.generation import ClaudeGenerator, Generator, Turn
+from codebase_rag.store import DEFAULT_DB_PATH, Store
 
 app = FastAPI(title="codebase-rag dashboard API", version="0.1.0")
 
@@ -68,9 +69,27 @@ class QueryResponse(BaseModel):
     latency_ms: int
 
 
+class CitationContentResponse(BaseModel):
+    content: str
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/citation", response_model=CitationContentResponse)
+def citation(repo: str, file_path: str, start_line: int, end_line: int) -> CitationContentResponse:
+    """The exact snippet behind a citation the /query endpoint already
+    returned (FR-3, T2) — a second lookup by coordinates rather than
+    carrying full chunk content in every query response."""
+    if not DEFAULT_DB_PATH.exists():
+        raise HTTPException(status_code=404, detail="Nothing indexed yet.")
+    with Store(DEFAULT_DB_PATH) as store:
+        content = store.get_chunk(repo, file_path, start_line, end_line)
+    if content is None:
+        raise HTTPException(status_code=404, detail="No such citation - the repo may have been reindexed since.")
+    return CitationContentResponse(content=content)
 
 
 @app.post("/query", response_model=QueryResponse)

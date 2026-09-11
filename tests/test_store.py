@@ -47,6 +47,25 @@ def test_replace_repo_chunks_drops_stale_entries(tmp_path: Path):
         assert {row[2] for row in results} == {"new.py"}
 
 
+def test_get_chunk_returns_content_for_exact_coordinates(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.replace_repo_chunks("demo", [_chunk("demo", "a.py", "alpha")], [[1.0, 0.0]])
+
+        content = store.get_chunk("demo", "a.py", start_line=1, end_line=1)
+
+        assert content == "alpha"
+
+
+def test_get_chunk_returns_none_when_no_chunk_matches(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.replace_repo_chunks("demo", [_chunk("demo", "a.py", "alpha")], [[1.0, 0.0]])
+
+        # wrong repo, wrong file, and a stale line range all miss cleanly
+        assert store.get_chunk("other", "a.py", 1, 1) is None
+        assert store.get_chunk("demo", "b.py", 1, 1) is None
+        assert store.get_chunk("demo", "a.py", 5, 9) is None
+
+
 def test_indexed_repos_lists_distinct_repos(tmp_path: Path):
     with Store(tmp_path / "index.db") as store:
         store.replace_repo_chunks("repo-a", [_chunk("repo-a", "x.py", "x")], [[1.0]])

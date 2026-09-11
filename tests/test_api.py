@@ -182,3 +182,36 @@ def test_query_missing_question_is_rejected_with_422(tmp_path: Path, monkeypatch
     result = client.post("/query", json={})
 
     assert result.status_code == 422
+
+
+def test_citation_with_nothing_indexed_returns_404(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = client.get(
+        "/citation", params={"repo": "demo", "file_path": "app.py", "start_line": 1, "end_line": 1}
+    )
+
+    assert result.status_code == 404
+
+
+def test_citation_returns_the_exact_snippet(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _index_one_repo(tmp_path, monkeypatch)
+
+    result = client.get(
+        "/citation", params={"repo": "demo", "file_path": "app.py", "start_line": 1, "end_line": 1}
+    )
+
+    assert result.status_code == 200, result.text
+    assert result.json() == {"content": "def export_package(): ..."}
+
+
+def test_citation_with_no_matching_chunk_returns_404(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _index_one_repo(tmp_path, monkeypatch)
+
+    result = client.get(
+        "/citation", params={"repo": "demo", "file_path": "does-not-exist.py", "start_line": 1, "end_line": 1}
+    )
+
+    assert result.status_code == 404
