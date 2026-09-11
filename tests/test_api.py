@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 import codebase_rag.api as api_module
 from codebase_rag.api import app
+from codebase_rag.store import DEFAULT_DB_PATH, Store
 
 client = TestClient(app)
 
@@ -234,6 +235,143 @@ def test_repos_malformed_config_yaml_returns_400(tmp_path: Path, monkeypatch):
 
     assert result.status_code == 400
     assert "is missing name" in result.json()["detail"]
+
+
+def _configure_repo(tmp_path: Path, name: str = "demo", file_count: int = 3) -> Path:
+    """A repo entry in config.yaml with real files on disk, but NOT yet
+    indexed - the reindex endpoints are the ones expected to do that."""
+    repo_dir = tmp_path / f"{name}-repo"
+    repo_dir.mkdir()
+    for i in range(file_count):
+        (repo_dir / f"f{i}.py").write_text(f"x = {i}", encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else "repos:\n"
+    config_path.write_text(existing + f"  - name: {name}\n    path: {repo_dir.as_posix()}\n", encoding="utf-8")
+    return repo_dir
+
+
+def test_trigger_reindex_malformed_config_yaml_returns_400(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text("repos:\n  - path: /repos/demo\n", encoding="utf-8")
+
+    result = client.post("/repos/demo/reindex")
+
+    assert result.status_code == 400
+    assert "is missing name" in result.json()["detail"]
+
+
+def test_reindex_status_db_exists_but_no_job_for_this_repo_returns_404(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        store.create_job("other-repo")
+
+    result = client.get("/repos/demo/reindex")
+
+    assert result.status_code == 404
+
+
+def test_trigger_reindex_unknown_repo_returns_404(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = client.post("/repos/nonexistent/reindex")
+
+    assert result.status_code == 404
+    assert "nonexistent" in result.json()["detail"]
+
+
+def test_trigger_reindex_path_not_a_directory_returns_400(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "repos:\n  - name: demo\n    path: /does/not/exist\n", encoding="utf-8"
+    )
+
+    result = client.post("/repos/demo/reindex")
+
+    assert result.status_code == 400
+    assert "isn't a directory" in result.json()["detail"]
+
+
+def test_trigger_reindex_runs_in_the_background_and_persists_chunks(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _configure_repo(tmp_path)
+    monkeypatch.setattr(api_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+
+    result = client.post("/repos/demo/reindex")
+
+    assert result.status_code == 202, result.text
+    body = result.json()
+    assert body["repo"] == "demo"
+    # TestClient runs the background task inline before returning, so the
+    # job has already finished by the time the response comes back.
+    status = client.get("/repos/demo/reindex")
+    assert status.status_code == 200, status.text
+    job = status.json()
+    assert job["status"] == "done"
+    assert job["total_chunks"] == 3
+    assert job["embedded_chunks"] == 3
+
+    repos_result = client.get("/repos")
+    assert repos_result.json()["repos"][0]["indexed"] is True
+
+
+def test_trigger_reindex_rejects_a_duplicate_for_a_running_repo(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _configure_repo(tmp_path)
+    # seed a still-"running" job directly, since a real trigger through the
+    # TestClient completes its background task before returning
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        store.create_job("demo")
+
+    result = client.post("/repos/demo/reindex")
+
+    assert result.status_code == 409
+    assert "already reindexing" in result.json()["detail"]
+
+
+def test_reindex_status_with_no_job_ever_run_returns_404(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = client.get("/repos/demo/reindex")
+
+    assert result.status_code == 404
+
+
+def test_cancel_reindex_with_no_job_ever_run_returns_404(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = client.delete("/repos/demo/reindex")
+
+    assert result.status_code == 404
+
+
+def test_cancel_reindex_when_not_currently_running_returns_409(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        job_id = store.create_job("demo")
+        store.finish_job(job_id, status="done")
+
+    result = client.delete("/repos/demo/reindex")
+
+    assert result.status_code == 409
+    assert "isn't currently reindexing" in result.json()["detail"]
+
+
+def test_cancel_reindex_flags_a_running_job(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        store.create_job("demo")
+
+    result = client.delete("/repos/demo/reindex")
+
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["cancel_requested"] is True
+    with Store(DEFAULT_DB_PATH) as store:
+        assert store.is_job_cancel_requested(body["job_id"]) is True
 
 
 def test_repos_lists_configured_repos_with_indexed_state_and_timestamp(tmp_path: Path, monkeypatch):

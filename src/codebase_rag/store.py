@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from array import array
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,7 +42,43 @@ CREATE TABLE IF NOT EXISTS query_log (
     latency_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_query_log_asked_at ON query_log(asked_at);
+
+-- Background reindex jobs (T4 of the v2 dashboard PRD, FR-5). The partial
+-- unique index is what makes "reject a duplicate trigger" (§10 Q11) an
+-- atomic, race-free DB constraint rather than an app-level check-then-insert:
+-- a second INSERT for a repo that already has a 'running' row fails with
+-- sqlite3.IntegrityError, which create_job() turns into JobAlreadyRunningError.
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    status TEXT NOT NULL,  -- 'running' | 'done' | 'failed' | 'cancelled'
+    total_chunks INTEGER,
+    embedded_chunks INTEGER NOT NULL DEFAULT 0,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_repo ON jobs(repo, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_running_per_repo ON jobs(repo) WHERE status = 'running';
 """
+
+
+class JobAlreadyRunningError(ValueError):
+    """A reindex job is already running for this repo (§10 Q11)."""
+
+
+@dataclass(frozen=True)
+class JobRow:
+    id: int
+    repo: str
+    status: str
+    total_chunks: int | None
+    embedded_chunks: int
+    cancel_requested: bool
+    error: str | None
+    started_at: str
+    finished_at: str | None
 
 
 def _to_blob(vector: list[float]) -> bytes:
@@ -180,3 +217,69 @@ class Store:
             "SELECT COUNT(*) FROM query_log WHERE asked_at >= ?", (since.isoformat(),)
         ).fetchone()
         return count
+
+    def create_job(self, repo: str) -> int:
+        """Start tracking a new reindex job for `repo`. Raises
+        `JobAlreadyRunningError` if one is already running for it — see the
+        schema's partial unique index above for why this can't race."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._conn:
+                cursor = self._conn.execute(
+                    "INSERT INTO jobs (repo, status, embedded_chunks, cancel_requested, started_at) "
+                    "VALUES (?, 'running', 0, 0, ?)",
+                    (repo, now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise JobAlreadyRunningError(f"'{repo}' is already reindexing.") from exc
+        return cursor.lastrowid
+
+    def set_job_total(self, job_id: int, total_chunks: int) -> None:
+        with self._conn:
+            self._conn.execute("UPDATE jobs SET total_chunks = ? WHERE id = ?", (total_chunks, job_id))
+
+    def update_job_progress(self, job_id: int, embedded_chunks: int) -> None:
+        with self._conn:
+            self._conn.execute("UPDATE jobs SET embedded_chunks = ? WHERE id = ?", (embedded_chunks, job_id))
+
+    def request_job_cancel(self, job_id: int) -> None:
+        """Flag a running job to stop at its next checkpoint (§10 Q12). A
+        no-op if the job isn't running (already finished, or doesn't exist)."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE jobs SET cancel_requested = 1 WHERE id = ? AND status = 'running'", (job_id,)
+            )
+
+    def is_job_cancel_requested(self, job_id: int) -> bool:
+        row = self._conn.execute("SELECT cancel_requested FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return bool(row and row[0])
+
+    def finish_job(self, job_id: int, status: str, error: str | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn:
+            self._conn.execute(
+                "UPDATE jobs SET status = ?, error = ?, finished_at = ? WHERE id = ?",
+                (status, error, now, job_id),
+            )
+
+    _JOB_COLUMNS = (
+        "id, repo, status, total_chunks, embedded_chunks, cancel_requested, error, started_at, finished_at"
+    )
+
+    def _row_to_job(self, row: tuple) -> JobRow:
+        id_, repo, status, total, embedded, cancel_requested, error, started_at, finished_at = row
+        return JobRow(id_, repo, status, total, embedded, bool(cancel_requested), error, started_at, finished_at)
+
+    def get_job(self, job_id: int) -> JobRow | None:
+        row = self._conn.execute(f"SELECT {self._JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def latest_job_for_repo(self, repo: str) -> JobRow | None:
+        """The most recently created job for `repo`, if any — since only one
+        job can ever be 'running' for a repo at a time (the schema's partial
+        unique index), this is also the currently-running one whenever one
+        exists."""
+        row = self._conn.execute(
+            f"SELECT {self._JOB_COLUMNS} FROM jobs WHERE repo = ? ORDER BY id DESC LIMIT 1", (repo,)
+        ).fetchone()
+        return self._row_to_job(row) if row else None
