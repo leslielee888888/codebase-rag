@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from codebase_rag.config import Config, ConfigError, RepoEntry, load_config
+from codebase_rag.config import Config, ConfigError, RepoEntry, load_config, save_config
 
 
 def test_load_config_on_a_nonexistent_path_returns_empty_config(tmp_path: Path):
@@ -123,3 +123,29 @@ def test_config_repo_names_preserves_order():
     )
 
     assert config.repo_names() == ["z", "a"]
+
+
+def test_save_config_then_load_config_round_trips(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    config = Config(repos=[RepoEntry(name="a", path="/repos/a"), RepoEntry(name="b", path="/repos/b")])
+
+    save_config(config, path)
+
+    assert load_config(path) == config
+
+
+def test_save_config_on_an_empty_repo_list_writes_a_loadable_file(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+
+    save_config(Config(repos=[]), path)
+
+    assert load_config(path) == Config(repos=[])
+
+
+def test_save_config_overwrites_an_existing_file(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text("repos:\n  - name: old\n    path: /old\n", encoding="utf-8")
+
+    save_config(Config(repos=[RepoEntry(name="new", path="/new")]), path)
+
+    assert load_config(path) == Config(repos=[RepoEntry(name="new", path="/new")])

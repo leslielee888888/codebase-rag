@@ -15,11 +15,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from codebase_rag import answering
-from codebase_rag.config import ConfigError, load_config
+from codebase_rag.config import Config, ConfigError, RepoEntry, load_config, save_config
 from codebase_rag.embeddings import EmbeddingClient, OllamaEmbeddingClient
 from codebase_rag.generation import ClaudeGenerator, Generator, Turn
 from codebase_rag.reindexing import run_reindex_job
@@ -86,6 +86,11 @@ class RepoOut(BaseModel):
 
 class ReposResponse(BaseModel):
     repos: list[RepoOut]
+
+
+class AddRepoRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    path: str = Field(..., min_length=1)
 
 
 class StatsResponse(BaseModel):
@@ -186,6 +191,49 @@ def repos() -> ReposResponse:
             for r in config.repos
         ]
     )
+
+
+@app.post("/repos", response_model=RepoOut, status_code=201)
+def add_repo(request: AddRepoRequest) -> RepoOut:
+    """Add a repo entry already reachable on the NAS filesystem (FR-8a,
+    T6) — a UI-editable equivalent of hand-editing config.yaml, not a
+    file-upload feature; the content itself must already be there."""
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if config.find(request.name) is not None:
+        raise HTTPException(status_code=409, detail=f"'{request.name}' is already configured.")
+
+    updated = Config(repos=[*config.repos, RepoEntry(name=request.name, path=request.path)])
+    save_config(updated)
+
+    return RepoOut(name=request.name, path=request.path, indexed=False, last_indexed_at=None)
+
+
+@app.delete("/repos/{repo}", status_code=204)
+def remove_repo(repo: str) -> Response:
+    """Remove a repo entry and delete its indexed chunks immediately
+    (FR-8b, §10 Q9) — no lingering, unlisted-but-still-searchable content.
+    The confirm-before-remove step (§10 Q13) is the frontend's job (T9);
+    this endpoint does exactly what it's asked, unconditionally."""
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if config.find(repo) is None:
+        raise HTTPException(status_code=404, detail=f"'{repo}' isn't in config.yaml.")
+
+    updated = Config(repos=[r for r in config.repos if r.name != repo])
+    save_config(updated)
+
+    if DEFAULT_DB_PATH.exists():
+        with Store(DEFAULT_DB_PATH) as store:
+            store.delete_repo_chunks(repo)
+
+    return Response(status_code=204)
 
 
 @app.post("/repos/{repo}/reindex", response_model=JobOut, status_code=202)

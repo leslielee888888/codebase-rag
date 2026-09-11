@@ -38,6 +38,23 @@ def test_search_respects_repo_scope(tmp_path: Path):
         assert {row[1] for row in scoped} == {"repo-a"}
 
 
+def test_delete_repo_chunks_removes_only_that_repos_chunks(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.replace_repo_chunks("repo-a", [_chunk("repo-a", "x.py", "x")], [[1.0]])
+        store.replace_repo_chunks("repo-b", [_chunk("repo-b", "y.py", "y")], [[1.0]])
+
+        store.delete_repo_chunks("repo-a")
+
+        assert store.indexed_repos() == ["repo-b"]
+
+
+def test_delete_repo_chunks_on_an_unindexed_repo_is_a_harmless_no_op(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.delete_repo_chunks("never-indexed")  # must not raise
+
+        assert store.indexed_repos() == []
+
+
 def test_replace_repo_chunks_drops_stale_entries(tmp_path: Path):
     with Store(tmp_path / "index.db") as store:
         store.replace_repo_chunks("demo", [_chunk("demo", "old.py", "old")], [[1.0, 0.0]])
