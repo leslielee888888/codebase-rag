@@ -85,6 +85,34 @@ def test_reindex_drops_stale_entries(tmp_path: Path, monkeypatch):
     assert file_paths == {"new.py"}
 
 
+def test_index_batches_embedding_across_many_files(tmp_path: Path, monkeypatch):
+    """FR-7: embedding runs in batches (with a progress bar) rather than one
+    giant call — prove every chunk still gets embedded and persisted when
+    there are enough files to span multiple batches."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    file_count = cli_module.EMBED_BATCH_SIZE * 2 + 3  # spans 3 batches
+    for i in range(file_count):
+        (repo_dir / f"f{i}.py").write_text(f"x = {i}", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["index", "demo"])
+
+    assert result.exit_code == 0, result.output
+    assert f"{file_count} chunks" in result.output
+
+    from codebase_rag.store import DEFAULT_DB_PATH, Store
+
+    with Store(DEFAULT_DB_PATH) as store:
+        rows = store.search(query_vector=[0.0, 0.0], top_k=file_count + 10)
+    assert len(rows) == file_count
+
+
 class _FakeGenerator:
     """Deterministic, network-free stand-in for ClaudeGenerator (FR-2)."""
 

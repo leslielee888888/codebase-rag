@@ -20,6 +20,7 @@ from codebase_rag.generation import ClaudeGenerator, Generator, RetrievedChunk
 from codebase_rag.store import DEFAULT_DB_PATH, Store
 
 TOP_K = 8
+EMBED_BATCH_SIZE = 20
 
 app = typer.Typer(
     name="codebase-rag",
@@ -51,9 +52,16 @@ def index(
         raise typer.Exit(code=1)
     typer.echo(f"{len(chunks)} chunks. Embedding via Ollama ({DEFAULT_MODEL})...")
 
+    # Embedded in batches, with a progress bar (FR-7) — the slow part is the
+    # network round-trip to Ollama, so this is also where a large codebase
+    # actually needs "roughly how far along it is".
     client: EmbeddingClient = OllamaEmbeddingClient()
+    embeddings: list[list[float]] = []
     try:
-        embeddings = client.embed([c.content for c in chunks])
+        with typer.progressbar(range(0, len(chunks), EMBED_BATCH_SIZE), label="Embedding") as batches:
+            for start in batches:
+                batch = chunks[start : start + EMBED_BATCH_SIZE]
+                embeddings.extend(client.embed([c.content for c in batch]))
     except Exception as exc:  # Ollama unreachable, model not pulled, etc.
         typer.echo(f"Embedding failed: {exc}")
         raise typer.Exit(code=1) from exc
