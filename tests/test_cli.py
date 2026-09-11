@@ -29,6 +29,19 @@ def test_query_with_no_repos_configured_errors_cleanly():
     assert "index" in result.output.lower()
 
 
+def test_malformed_config_yaml_errors_cleanly_not_a_traceback(tmp_path: Path, monkeypatch):
+    """PR #13: a config.yaml entry missing 'name'/'path' used to raise a raw
+    KeyError. It must surface as a clean CLI message instead."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text("repos:\n  - path: /repos/demo\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["index", "demo"])
+
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "is missing name" in result.output
+
+
 class _FakeEmbeddingClient:
     """Deterministic, network-free stand-in for OllamaEmbeddingClient (FR-1)."""
 

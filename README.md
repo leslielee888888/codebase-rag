@@ -11,6 +11,7 @@ for a one-page summary.
 ## Usage
 
 ```sh
+pip install .                        # installs the codebase-rag console script
 cp config.example.yaml config.yaml   # fill in your real repo paths
 ollama pull qwen3-embedding:0.6b     # once, before the first index
 codebase-rag index <repo-name>

@@ -17,7 +17,7 @@ from typing import Optional
 import typer
 
 from codebase_rag.chunking import chunk_repo
-from codebase_rag.config import load_config
+from codebase_rag.config import Config, ConfigError, load_config
 from codebase_rag.embeddings import DEFAULT_MODEL, EmbeddingClient, OllamaEmbeddingClient
 from codebase_rag.generation import ClaudeGenerator, Generator, RetrievedChunk, Turn
 from codebase_rag.store import DEFAULT_DB_PATH, Store
@@ -32,12 +32,22 @@ app = typer.Typer(
 )
 
 
+def _load_config() -> Config:
+    """`load_config()`, with a malformed config.yaml turned into a clean CLI
+    error instead of a raw traceback (PR #13)."""
+    try:
+        return load_config()
+    except ConfigError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+
 @app.command()
 def index(
     repo: str = typer.Argument(..., help="Name of the repo to index, as listed in config.yaml."),
 ) -> None:
     """Index (or reindex) one configured codebase (FR-1, FR-3)."""
-    config = load_config()
+    config = _load_config()
     entry = config.find(repo)
     if entry is None:
         typer.echo(f"'{repo}' isn't in config.yaml. Known repos: {config.repo_names() or 'none configured yet'}")
@@ -77,7 +87,7 @@ def index(
 
 
 def _resolve_scope(repos: Optional[list[str]]) -> list[str]:
-    config = load_config()
+    config = _load_config()
     scope = repos or config.repo_names()
     if not scope:
         typer.echo("No repos configured yet - run 'codebase-rag index <repo>' first.")

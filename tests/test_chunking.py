@@ -85,3 +85,33 @@ def test_empty_file_produces_no_chunks(tmp_path: Path):
     f.write_text("", encoding="utf-8")
 
     assert chunk_file("demo", tmp_path, f) == []
+
+
+def test_sensitive_files_are_never_indexed(tmp_path: Path):
+    """FR-1, hardened after PR #13's review: credentials never get embedded,
+    stored, or sent to Claude, regardless of what a real repo happens to have
+    checked in."""
+    (tmp_path / "app.py").write_text("print('hi')", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=abc123", encoding="utf-8")
+    (tmp_path / ".env.production").write_text("SECRET=xyz789", encoding="utf-8")
+    (tmp_path / "server.pem").write_text("-----BEGIN CERTIFICATE-----", encoding="utf-8")
+    (tmp_path / "private.key").write_text("-----BEGIN PRIVATE KEY-----", encoding="utf-8")
+    (tmp_path / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----", encoding="utf-8")
+    (tmp_path / "aws_credentials").write_text("aws_access_key_id=AKIA...", encoding="utf-8")
+    (tmp_path / ".netrc").write_text("machine example.com login x password y", encoding="utf-8")
+
+    found = {p.name for p in iter_source_files(tmp_path)}
+
+    assert found == {"app.py"}
+
+
+def test_ssh_and_aws_directories_are_never_walked(tmp_path: Path):
+    (tmp_path / "app.py").write_text("print('hi')", encoding="utf-8")
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "id_ed25519").write_text("-----BEGIN OPENSSH PRIVATE KEY-----", encoding="utf-8")
+    (tmp_path / ".aws").mkdir()
+    (tmp_path / ".aws" / "credentials").write_text("[default]\naws_access_key_id=AKIA...", encoding="utf-8")
+
+    found = {p.name for p in iter_source_files(tmp_path)}
+
+    assert found == {"app.py"}

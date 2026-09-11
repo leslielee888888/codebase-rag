@@ -18,12 +18,14 @@ MAX_LINES_PER_CHUNK = 100
 OVERLAP_LINES = 20
 MAX_FILE_BYTES = 1_000_000  # skip generated/minified/binary-ish files
 
-# Directories no codebase-indexing tool should walk into.
+# Directories no codebase-indexing tool should walk into. .ssh/.aws are here
+# (not just filename-matched below) so nothing under them is ever read at all.
 IGNORED_DIRS = {
     ".git", ".hg", ".svn",
     "node_modules", "__pycache__", ".venv", "venv", ".tox",
     "dist", "build", ".next", ".nuxt", "target", "bin", "obj",
     ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".ssh", ".aws",
 }
 
 # Extensions that are essentially never useful source text for retrieval.
@@ -34,6 +36,25 @@ IGNORED_SUFFIXES = {
     ".pyc", ".pyo", ".so", ".dll", ".exe",
     ".lock",
 }
+
+# Filename patterns that are credentials, not source — never index these,
+# regardless of extension. A repo that legitimately needs to check one of
+# these in (rare, and usually a mistake) can still be read directly; this
+# tool just never embeds it, stores it in SQLite, or sends it to Claude.
+SENSITIVE_SUFFIXES = {".pem", ".key", ".pfx", ".p12"}
+SENSITIVE_EXACT_NAMES = {"credentials", ".netrc", ".npmrc", ".pypirc"}
+SENSITIVE_NAME_PREFIXES = (".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
+
+
+def _is_sensitive(path: Path) -> bool:
+    name = path.name
+    if path.suffix.lower() in SENSITIVE_SUFFIXES:
+        return True
+    if name.lower() in SENSITIVE_EXACT_NAMES:
+        return True
+    if name.startswith(SENSITIVE_NAME_PREFIXES):
+        return True
+    return "credentials" in name.lower()
 
 
 @dataclass(frozen=True)
@@ -50,6 +71,8 @@ class Chunk:
 
 def _is_indexable(path: Path) -> bool:
     if path.suffix.lower() in IGNORED_SUFFIXES:
+        return False
+    if _is_sensitive(path):
         return False
     try:
         if path.stat().st_size > MAX_FILE_BYTES:
