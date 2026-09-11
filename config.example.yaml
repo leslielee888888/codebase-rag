@@ -1,0 +1,7 @@
+# Copy this to config.yaml and fill in your real repo paths.
+# config.yaml is git-ignored — it names local paths, never checked in.
+repos:
+  - name: ai-docs
+    path: /path/to/ai-docs
+  - name: aus-tax-lodge
+    path: /path/to/aus-tax-lodge
