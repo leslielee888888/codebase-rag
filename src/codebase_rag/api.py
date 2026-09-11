@@ -12,14 +12,17 @@ Run locally with `uvicorn codebase_rag.api:app --reload`, or via the
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from pathlib import Path
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from codebase_rag import answering
 from codebase_rag.config import ConfigError, load_config
 from codebase_rag.embeddings import EmbeddingClient, OllamaEmbeddingClient
 from codebase_rag.generation import ClaudeGenerator, Generator, Turn
-from codebase_rag.store import DEFAULT_DB_PATH, Store
+from codebase_rag.reindexing import run_reindex_job
+from codebase_rag.store import DEFAULT_DB_PATH, JobAlreadyRunningError, JobRow, Store
 
 app = FastAPI(title="codebase-rag dashboard API", version="0.1.0")
 
@@ -84,6 +87,28 @@ class ReposResponse(BaseModel):
     repos: list[RepoOut]
 
 
+class JobOut(BaseModel):
+    job_id: int
+    repo: str
+    status: str
+    total_chunks: int | None = None
+    embedded_chunks: int
+    cancel_requested: bool
+    error: str | None = None
+
+    @classmethod
+    def from_row(cls, job: JobRow) -> "JobOut":
+        return cls(
+            job_id=job.id,
+            repo=job.repo,
+            status=job.status,
+            total_chunks=job.total_chunks,
+            embedded_chunks=job.embedded_chunks,
+            cancel_requested=job.cancel_requested,
+            error=job.error,
+        )
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -109,6 +134,67 @@ def repos() -> ReposResponse:
             for r in config.repos
         ]
     )
+
+
+@app.post("/repos/{repo}/reindex", response_model=JobOut, status_code=202)
+def trigger_reindex(repo: str, background_tasks: BackgroundTasks) -> JobOut:
+    """Enqueue a reindex as a background job (FR-5, T4) — the request
+    returns as soon as the job is accepted, not when it finishes (§10 Q2).
+    Rejects a repo that's already reindexing (§10 Q11) rather than queueing
+    or restarting it."""
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    entry = config.find(repo)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"'{repo}' isn't in config.yaml.")
+
+    root = Path(entry.path)
+    if not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"'{entry.path}' isn't a directory - check config.yaml.")
+
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        try:
+            job_id = store.create_job(repo)
+        except JobAlreadyRunningError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        job = store.get_job(job_id)
+
+    embed_client: EmbeddingClient = OllamaEmbeddingClient()
+    background_tasks.add_task(run_reindex_job, job_id, repo, root, DEFAULT_DB_PATH, embed_client)
+
+    return JobOut.from_row(job)
+
+
+@app.get("/repos/{repo}/reindex", response_model=JobOut)
+def reindex_status(repo: str) -> JobOut:
+    """The latest reindex job for `repo` — running, or the outcome of the
+    most recent one (FR-5)."""
+    if not DEFAULT_DB_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"No reindex job found for '{repo}'.")
+    with Store(DEFAULT_DB_PATH) as store:
+        job = store.latest_job_for_repo(repo)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"No reindex job found for '{repo}'.")
+    return JobOut.from_row(job)
+
+
+@app.delete("/repos/{repo}/reindex", response_model=JobOut)
+def cancel_reindex(repo: str) -> JobOut:
+    """Cancel `repo`'s running reindex job (FR-5) — flags it to stop at its
+    next checkpoint; the existing index is untouched (§10 Q12)."""
+    if not DEFAULT_DB_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"No reindex job found for '{repo}'.")
+    with Store(DEFAULT_DB_PATH) as store:
+        job = store.latest_job_for_repo(repo)
+        if job is None or job.status != "running":
+            raise HTTPException(status_code=409, detail=f"'{repo}' isn't currently reindexing.")
+        store.request_job_cancel(job.id)
+        job = store.get_job(job.id)
+    return JobOut.from_row(job)
 
 
 @app.get("/citation", response_model=CitationContentResponse)

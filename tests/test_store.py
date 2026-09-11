@@ -3,8 +3,10 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from codebase_rag.chunking import Chunk
-from codebase_rag.store import Store, _cosine
+from codebase_rag.store import JobAlreadyRunningError, Store, _cosine
 
 
 def _chunk(repo: str, file_path: str, content: str) -> Chunk:
@@ -130,6 +132,114 @@ def test_cosine_zero_vector_returns_zero_not_a_division_error():
     assert _cosine([0.0, 0.0], [1.0, 1.0]) == 0.0
     assert _cosine([1.0, 1.0], [0.0, 0.0]) == 0.0
     assert _cosine([1.0, 1.0], [0.0, 0.0], norm_a=0.0) == 0.0
+
+
+def test_create_job_then_get_job_round_trips(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        job_id = store.create_job("demo")
+
+        job = store.get_job(job_id)
+
+        assert job.repo == "demo"
+        assert job.status == "running"
+        assert job.total_chunks is None
+        assert job.embedded_chunks == 0
+        assert job.cancel_requested is False
+        assert job.error is None
+        assert job.finished_at is None
+
+
+def test_create_job_rejects_a_second_running_job_for_the_same_repo(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.create_job("demo")
+
+        with pytest.raises(JobAlreadyRunningError, match="demo"):
+            store.create_job("demo")
+
+
+def test_create_job_allows_a_new_job_once_the_previous_one_finished(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        first = store.create_job("demo")
+        store.finish_job(first, status="done")
+
+        second = store.create_job("demo")  # must not raise
+
+        assert second != first
+
+
+def test_create_job_allows_concurrent_jobs_for_different_repos(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.create_job("repo-a")
+        store.create_job("repo-b")  # must not raise
+
+
+def test_set_job_total_and_update_job_progress(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        job_id = store.create_job("demo")
+        store.set_job_total(job_id, 42)
+        store.update_job_progress(job_id, 17)
+
+        job = store.get_job(job_id)
+
+        assert job.total_chunks == 42
+        assert job.embedded_chunks == 17
+
+
+def test_request_job_cancel_sets_the_flag_only_on_a_running_job(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        running = store.create_job("demo")
+        store.request_job_cancel(running)
+        assert store.is_job_cancel_requested(running) is True
+
+        finished = store.create_job("other")
+        store.finish_job(finished, status="done")
+        store.request_job_cancel(finished)  # no-op: not running
+        assert store.is_job_cancel_requested(finished) is False
+
+
+def test_finish_job_records_status_error_and_finished_at(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        job_id = store.create_job("demo")
+
+        store.finish_job(job_id, status="failed", error="Embedding failed: boom")
+
+        job = store.get_job(job_id)
+        assert job.status == "failed"
+        assert job.error == "Embedding failed: boom"
+        assert job.finished_at is not None
+
+
+def test_finish_job_frees_up_the_repo_for_a_new_job(tmp_path: Path):
+    """The partial unique index only guards 'running' rows - once a job is
+    finished, a new one for the same repo must be allowed (see also
+    test_create_job_allows_a_new_job_once_the_previous_one_finished, which
+    checks this from create_job's side)."""
+    with Store(tmp_path / "index.db") as store:
+        job_id = store.create_job("demo")
+        store.finish_job(job_id, status="cancelled")
+
+        store.create_job("demo")  # must not raise
+
+
+def test_latest_job_for_repo_returns_the_most_recent_one(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        first = store.create_job("demo")
+        store.finish_job(first, status="done")
+        second = store.create_job("demo")
+
+        latest = store.latest_job_for_repo("demo")
+
+        assert latest.id == second
+
+
+def test_latest_job_for_repo_returns_none_when_no_job_ever_ran(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        assert store.latest_job_for_repo("never-indexed") is None
+
+
+def test_get_job_returns_none_for_an_unknown_id(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        assert store.get_job(999) is None
 
 
 def test_search_top_k_truncates_to_the_best_matches(tmp_path: Path):
