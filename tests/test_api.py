@@ -215,3 +215,43 @@ def test_citation_with_no_matching_chunk_returns_404(tmp_path: Path, monkeypatch
     )
 
     assert result.status_code == 404
+
+
+def test_repos_with_nothing_configured_returns_empty_list(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = client.get("/repos")
+
+    assert result.status_code == 200, result.text
+    assert result.json() == {"repos": []}
+
+
+def test_repos_malformed_config_yaml_returns_400(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text("repos:\n  - path: /repos/demo\n", encoding="utf-8")
+
+    result = client.get("/repos")
+
+    assert result.status_code == 400
+    assert "is missing name" in result.json()["detail"]
+
+
+def test_repos_lists_configured_repos_with_indexed_state_and_timestamp(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _index_one_repo(tmp_path, monkeypatch, repo="demo")
+    # a second repo configured but never indexed (FR-4: still listed)
+    (tmp_path / "config.yaml").write_text(
+        (tmp_path / "config.yaml").read_text(encoding="utf-8")
+        + "  - name: unindexed\n    path: /repos/unindexed\n",
+        encoding="utf-8",
+    )
+
+    result = client.get("/repos")
+
+    assert result.status_code == 200, result.text
+    by_name = {r["name"]: r for r in result.json()["repos"]}
+    assert set(by_name) == {"demo", "unindexed"}
+    assert by_name["demo"]["indexed"] is True
+    assert by_name["demo"]["last_indexed_at"]  # a real timestamp, not None
+    assert by_name["unindexed"]["indexed"] is False
+    assert by_name["unindexed"]["last_indexed_at"] is None
