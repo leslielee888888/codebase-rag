@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, cancelReindex, fetchReindexStatus, triggerReindex } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/format";
 import type { JobOut, RepoInfo } from "@/lib/types";
+import { RemoveRepoControl } from "./remove-repo-control";
 
 /** How often to re-poll a running (or cancelling) reindex job. */
 const POLL_INTERVAL_MS = 2000;
@@ -25,12 +26,15 @@ interface RepoRowProps {
   /** Notifies the parent to refetch `GET /repos` once a job finishes, so the
    * indexed/last-indexed columns reflect the new state. */
   onReindexed: () => void;
+  /** Notifies the parent to refetch `GET /repos` once this repo is removed
+   * (FR-8b), so it drops out of the list. */
+  onRemoved: () => void;
   /** Poll cadence for a running/cancelling job. A test-only knob — the real
    * app always uses the `POLL_INTERVAL_MS` default. */
   pollIntervalMs?: number;
 }
 
-export function RepoRow({ repo, onReindexed, pollIntervalMs = POLL_INTERVAL_MS }: RepoRowProps) {
+export function RepoRow({ repo, onReindexed, onRemoved, pollIntervalMs = POLL_INTERVAL_MS }: RepoRowProps) {
   const [state, setState] = useState<RowState>({ phase: "checking" });
   const mountedRef = useRef(true);
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -150,7 +154,10 @@ export function RepoRow({ repo, onReindexed, pollIntervalMs = POLL_INTERVAL_MS }
         {repo.indexed && repo.last_indexed_at ? formatRelativeTime(repo.last_indexed_at) : "—"}
       </td>
       <td className="px-3 py-3 align-top">
-        <RowActions state={state} onTrigger={handleTrigger} onCancel={handleCancel} />
+        <div className="flex flex-col items-start gap-2">
+          <RowActions state={state} onTrigger={handleTrigger} onCancel={handleCancel} />
+          <RemoveRepoControl repo={repo.name} onRemoved={onRemoved} />
+        </div>
       </td>
     </tr>
   );

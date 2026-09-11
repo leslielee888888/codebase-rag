@@ -4,10 +4,14 @@ import { RepoRow } from "./repo-row";
 interface RepoTableProps {
   repos: RepoInfo[];
   onReindexed: () => void;
+  /** Notifies the parent to refetch `GET /repos` once a repo is removed
+   * (FR-8b). */
+  onRemoved: () => void;
 }
 
-/** Every configured repo (FR-4) with its own reindex controls (FR-5). */
-export function RepoTable({ repos, onReindexed }: RepoTableProps) {
+/** Every configured repo (FR-4) with its own reindex (FR-5) and
+ * add/remove (FR-8) controls. */
+export function RepoTable({ repos, onReindexed, onRemoved }: RepoTableProps) {
   return (
     <div className="overflow-x-auto rounded-lg border border-line">
       <table className="w-full min-w-[560px] border-collapse text-left">
@@ -29,7 +33,7 @@ export function RepoTable({ repos, onReindexed }: RepoTableProps) {
         </thead>
         <tbody>
           {repos.map((repo) => (
-            <RepoRow key={repo.name} repo={repo} onReindexed={onReindexed} />
+            <RepoRow key={repo.name} repo={repo} onReindexed={onReindexed} onRemoved={onRemoved} />
           ))}
         </tbody>
       </table>

@@ -51,6 +51,20 @@ async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+/** Like `requestJson`, but for endpoints that return no body on success
+ * (e.g. a 204 DELETE) — parsing an empty body as JSON would throw. */
+async function requestVoid(input: string, init?: RequestInit): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(input, init);
+  } catch {
+    throw new ApiError(0, "Couldn't reach the codebase-rag API. Is it running?");
+  }
+  if (!response.ok) {
+    throw new ApiError(response.status, await parseErrorDetail(response));
+  }
+}
+
 /** `GET /repos` (FR-4/T3) — every configured repo, indexed or not. */
 export async function fetchRepos(signal?: AbortSignal): Promise<RepoInfo[]> {
   const data = await requestJson<{ repos: RepoInfo[] }>(`${apiBase()}/repos`, { signal });
@@ -117,6 +131,40 @@ export async function askQuestion(
       repos: input.repos && input.repos.length > 0 ? input.repos : undefined,
       history: input.history && input.history.length > 0 ? input.history : undefined,
     }),
+    signal,
+  });
+}
+
+export interface AddRepoInput {
+  name: string;
+  path: string;
+}
+
+/**
+ * `POST /repos` (FR-8a/T6) — adds a repo entry whose content is already
+ * reachable on the NAS filesystem; a UI equivalent of hand-editing
+ * `config.yaml`, not a file upload. Throws an `ApiError` with `status: 409`
+ * if `name` is already configured, `422` if a field is missing/empty, or
+ * `400` if `config.yaml` itself is malformed.
+ */
+export async function addRepo(input: AddRepoInput, signal?: AbortSignal): Promise<RepoInfo> {
+  return requestJson<RepoInfo>(`${apiBase()}/repos`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    signal,
+  });
+}
+
+/**
+ * `DELETE /repos/{repo}` (FR-8b/T6) — removes a repo entry and deletes its
+ * indexed chunks immediately (§10 Q9). The confirm-before-remove step (§10
+ * Q13) is the caller's job; this does exactly what it's asked. Throws a
+ * `404` `ApiError` if `repo` isn't configured.
+ */
+export async function removeRepo(repo: string, signal?: AbortSignal): Promise<void> {
+  return requestVoid(`${apiBase()}/repos/${encodeURIComponent(repo)}`, {
+    method: "DELETE",
     signal,
   });
 }

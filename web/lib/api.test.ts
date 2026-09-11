@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  addRepo,
   ApiError,
   askQuestion,
   cancelReindex,
   fetchCitationSnippet,
   fetchReindexStatus,
   fetchRepos,
+  removeRepo,
   triggerReindex,
 } from "./api";
 
@@ -213,6 +215,77 @@ describe("cancelReindex", () => {
       status: 409,
       message: "'codebase-rag' isn't currently reindexing.",
     });
+  });
+});
+
+describe("addRepo", () => {
+  it("POSTs the name/path and returns the created repo", async () => {
+    const repo = { name: "ai-docs", path: "/repos/ai-docs", indexed: false, last_indexed_at: null };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(repo, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(addRepo({ name: "ai-docs", path: "/repos/ai-docs" })).resolves.toEqual(repo);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/repos$/);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ name: "ai-docs", path: "/repos/ai-docs" });
+  });
+
+  it("maps a 409 (duplicate name) response to a clear ApiError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ detail: "'ai-docs' is already configured." }, 409)),
+    );
+
+    await expect(addRepo({ name: "ai-docs", path: "/repos/ai-docs" })).rejects.toMatchObject({
+      status: 409,
+      message: "'ai-docs' is already configured.",
+    });
+  });
+
+  it("maps a 400 (malformed config.yaml) response to an ApiError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ detail: "config.yaml is malformed." }, 400)),
+    );
+
+    await expect(addRepo({ name: "ai-docs", path: "/repos/ai-docs" })).rejects.toMatchObject({
+      status: 400,
+    });
+  });
+});
+
+describe("removeRepo", () => {
+  it("DELETEs /repos/{repo} and resolves with no body on a 204", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(removeRepo("ai-docs")).resolves.toBeUndefined();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/repos\/ai-docs$/);
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("maps a 404 (unknown repo) response to an ApiError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ detail: "'ai-docs' isn't in config.yaml." }, 404)),
+    );
+
+    await expect(removeRepo("ai-docs")).rejects.toMatchObject({
+      status: 404,
+      message: "'ai-docs' isn't in config.yaml.",
+    });
+  });
+
+  it("URL-encodes the repo name", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await removeRepo("a/b");
+
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toContain("/repos/a%2Fb");
   });
 });
 
