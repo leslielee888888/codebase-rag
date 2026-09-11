@@ -54,6 +54,119 @@ def test_index_command_chunks_embeds_and_persists(tmp_path: Path, monkeypatch):
     assert (tmp_path / "data" / "index.db").exists()
 
 
+def test_index_command_path_not_a_directory_errors_cleanly(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {(tmp_path / 'does-not-exist').as_posix()}\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["index", "demo"])
+
+    assert result.exit_code == 1
+    assert "isn't a directory" in result.output
+
+
+def test_index_command_no_indexable_files_errors_cleanly(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repo_dir = tmp_path / "empty-repo"
+    repo_dir.mkdir()
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["index", "demo"])
+
+    assert result.exit_code == 1
+    assert "No indexable files found" in result.output
+
+
+class _FailingEmbeddingClient:
+    """Simulates Ollama being unreachable, model not pulled, etc."""
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise ConnectionError("Failed to connect to Ollama.")
+
+
+def test_index_command_embedding_failure_errors_cleanly(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FailingEmbeddingClient)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["index", "demo"])
+
+    assert result.exit_code == 1
+    assert "Embedding failed" in result.output
+
+
+def test_query_with_nothing_indexed_at_all_errors_cleanly(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "repos:\n  - name: demo\n    path: /nonexistent\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["query", "anything"])
+
+    assert result.exit_code == 1
+    assert "Nothing indexed yet" in result.output
+
+
+def test_query_embedding_failure_errors_cleanly(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FailingEmbeddingClient)
+    result = runner.invoke(app, ["query", "anything"])
+
+    assert result.exit_code == 1
+    assert "Embedding failed" in result.output
+
+
+def test_query_generation_failure_errors_cleanly(tmp_path: Path, monkeypatch):
+    class _FailingGenerator:
+        def generate(self, question, chunks, history=None):
+            raise RuntimeError("Claude API unreachable")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    monkeypatch.setattr(cli_module, "ClaudeGenerator", _FailingGenerator)
+    result = runner.invoke(app, ["query", "anything"])
+
+    assert result.exit_code == 1
+    assert "Generation failed" in result.output
+
+
+def test_stats_with_nothing_indexed_errors_cleanly(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["stats"])
+
+    assert result.exit_code == 1
+    assert "Nothing indexed yet" in result.output
+
+
 def test_reindex_drops_stale_entries(tmp_path: Path, monkeypatch):
     """FR-3: running `index` again on a changed repo is the reindex — stale
     entries for deleted/renamed files are removed, not left dangling."""
@@ -266,7 +379,9 @@ def test_chat_carries_prior_turn_as_context_into_follow_ups(tmp_path: Path, monk
     assert "[1 prior turn(s)] Fake grounded answer to 'second question'" in result.output
 
 
-def test_chat_with_no_input_exits_cleanly(tmp_path: Path, monkeypatch):
+def test_chat_blank_line_exits_cleanly(tmp_path: Path, monkeypatch):
+    """A bare Enter must exit immediately, not re-prompt forever — typer.prompt's
+    default behavior re-asks on blank input, which would silently break this."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
 
@@ -279,6 +394,24 @@ def test_chat_with_no_input_exits_cleanly(tmp_path: Path, monkeypatch):
     assert runner.invoke(app, ["index", "demo"]).exit_code == 0
 
     result = runner.invoke(app, ["chat"], input="\n")
+
+    assert result.exit_code == 0, result.output
+
+
+def test_chat_eof_exits_cleanly(tmp_path: Path, monkeypatch):
+    """Ctrl+D (no more input at all, not even a blank line) also exits cleanly."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    result = runner.invoke(app, ["chat"], input="")
 
     assert result.exit_code == 0, result.output
 

@@ -179,7 +179,10 @@ def chat(
     history: list[Turn] = []
     while True:
         try:
-            question = typer.prompt("Ask", prompt_suffix="> ")
+            # default="" makes a bare Enter return immediately as "" instead
+            # of typer.prompt's normal behavior of re-asking on blank input —
+            # without it, "blank line to exit" silently never exits.
+            question = typer.prompt("Ask", prompt_suffix="> ", default="", show_default=False)
         except (typer.Abort, EOFError, KeyboardInterrupt):
             break
         if not question.strip():

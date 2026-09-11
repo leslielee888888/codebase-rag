@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from codebase_rag.chunking import chunk_file, chunk_repo, iter_source_files
+from codebase_rag.chunking import MAX_FILE_BYTES, chunk_file, chunk_repo, iter_source_files
 
 
 def test_small_file_is_a_single_chunk(tmp_path: Path):
@@ -59,3 +59,29 @@ def test_chunk_repo_covers_every_indexable_file(tmp_path: Path):
     chunks = chunk_repo("demo", tmp_path)
 
     assert {c.file_path for c in chunks} == {"a.py", "b.py"}
+
+
+def test_ignored_suffix_is_skipped_by_iter_source_files(tmp_path: Path):
+    (tmp_path / "app.py").write_text("print('hi')", encoding="utf-8")
+    (tmp_path / "icon.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    found = {p.name for p in iter_source_files(tmp_path)}
+
+    assert found == {"app.py"}
+
+
+def test_oversized_file_is_skipped_by_iter_source_files(tmp_path: Path):
+    (tmp_path / "normal.py").write_text("x = 1", encoding="utf-8")
+    huge = tmp_path / "generated.py"
+    huge.write_bytes(b"x" * (MAX_FILE_BYTES + 1))
+
+    found = {p.name for p in iter_source_files(tmp_path)}
+
+    assert found == {"normal.py"}
+
+
+def test_empty_file_produces_no_chunks(tmp_path: Path):
+    f = tmp_path / "empty.py"
+    f.write_text("", encoding="utf-8")
+
+    assert chunk_file("demo", tmp_path, f) == []
