@@ -3,8 +3,8 @@ import { NavLink } from "./nav-link";
 /**
  * The dashboard's persistent left nav (PRD §7). Static apart from the
  * active-link highlight, which `NavLink` handles on its own — this stays a
- * Server Component. "Repos" and "History" route to real placeholder pages
- * (T8/T10 build them out) rather than being inert links.
+ * Server Component. "Repos" (T8, done) and "History" (T10, still a
+ * placeholder) route to real pages rather than being inert links.
  */
 export function Sidebar() {
   return (

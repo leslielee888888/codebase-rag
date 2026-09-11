@@ -1,5 +1,5 @@
 import { apiBase } from "./config";
-import type { QueryResponse, RepoInfo, Turn } from "./types";
+import type { JobOut, QueryResponse, RepoInfo, Turn } from "./types";
 
 /**
  * Thrown for any non-2xx API response. `status` lets callers distinguish
@@ -55,6 +55,45 @@ async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
 export async function fetchRepos(signal?: AbortSignal): Promise<RepoInfo[]> {
   const data = await requestJson<{ repos: RepoInfo[] }>(`${apiBase()}/repos`, { signal });
   return data.repos;
+}
+
+/**
+ * `POST /repos/{repo}/reindex` (FR-5a/T4) — enqueues a reindex as a
+ * background job and returns immediately with its initial status. Throws an
+ * `ApiError` with `status: 409` if `repo` is already reindexing (FR-5b), or
+ * `400`/`404` if `repo` isn't configured or its path is missing.
+ */
+export async function triggerReindex(repo: string, signal?: AbortSignal): Promise<JobOut> {
+  return requestJson<JobOut>(`${apiBase()}/repos/${encodeURIComponent(repo)}/reindex`, {
+    method: "POST",
+    signal,
+  });
+}
+
+/**
+ * `GET /repos/{repo}/reindex` (FR-5a/T4) — the latest reindex job for
+ * `repo`. Poll this while `status` is `"running"`; it settles into `"done"`,
+ * `"failed"`, or `"cancelled"`. Throws a `404` `ApiError` if no job has ever
+ * run for `repo`.
+ */
+export async function fetchReindexStatus(repo: string, signal?: AbortSignal): Promise<JobOut> {
+  return requestJson<JobOut>(`${apiBase()}/repos/${encodeURIComponent(repo)}/reindex`, {
+    signal,
+  });
+}
+
+/**
+ * `DELETE /repos/{repo}/reindex` (FR-5c/T4) — requests cancellation of
+ * `repo`'s running job; it stops at its next checkpoint rather than
+ * instantly, so keep polling `fetchReindexStatus` until `status` is actually
+ * `"cancelled"`. Throws an `ApiError` with `status: 409` if `repo` isn't
+ * currently reindexing — not a fatal error, just stale UI state.
+ */
+export async function cancelReindex(repo: string, signal?: AbortSignal): Promise<JobOut> {
+  return requestJson<JobOut>(`${apiBase()}/repos/${encodeURIComponent(repo)}/reindex`, {
+    method: "DELETE",
+    signal,
+  });
 }
 
 export interface AskQuestionInput {
