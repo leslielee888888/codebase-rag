@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS query_log (
     question TEXT NOT NULL,
     repos TEXT NOT NULL,
     num_results INTEGER NOT NULL,
-    latency_ms INTEGER NOT NULL
+    latency_ms INTEGER NOT NULL,
+    answer TEXT,
+    source TEXT NOT NULL DEFAULT 'dashboard'
 );
 CREATE INDEX IF NOT EXISTS idx_query_log_asked_at ON query_log(asked_at);
 
@@ -64,8 +66,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_running_per_repo ON jobs(repo) WH
 """
 
 
+def _ensure_query_log_columns(conn: sqlite3.Connection) -> None:
+    """T5 of the dashboard PRD (§10 Q7) added `answer` and `source` to
+    `query_log` after it had already shipped in v1. `CREATE TABLE IF NOT
+    EXISTS` above only creates the up-to-date shape for a brand-new DB — an
+    existing NAS DB's `query_log` predates these columns, so this adds them
+    in place (existing rows get `answer = NULL`, `source = 'dashboard'`,
+    same as the column defaults) the same way any other online migration
+    would, guarded by a PRAGMA check since SQLite has no
+    `ADD COLUMN IF NOT EXISTS`."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(query_log)").fetchall()}
+    if "answer" not in cols:
+        conn.execute("ALTER TABLE query_log ADD COLUMN answer TEXT")
+    if "source" not in cols:
+        conn.execute("ALTER TABLE query_log ADD COLUMN source TEXT NOT NULL DEFAULT 'dashboard'")
+    conn.commit()
+
+
 class JobAlreadyRunningError(ValueError):
     """A reindex job is already running for this repo (§10 Q11)."""
+
+
+@dataclass(frozen=True)
+class QueryLogRow:
+    id: int
+    asked_at: str
+    question: str
+    repos: list[str]
+    answer: str | None
+    source: str
+    num_results: int
+    latency_ms: int
 
 
 @dataclass(frozen=True)
@@ -111,6 +142,7 @@ class Store:
         self._conn = sqlite3.connect(path)
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        _ensure_query_log_columns(self._conn)
 
     def close(self) -> None:
         self._conn.close()
@@ -200,14 +232,32 @@ class Store:
         scored.sort(key=lambda row: row[0], reverse=True)
         return scored[:top_k]
 
-    def log_query(self, question: str, repos: list[str], num_results: int, latency_ms: int) -> None:
-        """Record one query (§5/§9) — every query, its scope, result count, and
-        latency, so 'queries/week' is a count over this table, not separate
-        instrumentation."""
+    def log_query(
+        self,
+        question: str,
+        repos: list[str],
+        num_results: int,
+        latency_ms: int,
+        answer: str | None = None,
+        source: str = "dashboard",
+    ) -> None:
+        """Record one query (§5/§9) — every query, its scope, result count,
+        latency, its actual answer, and which surface asked it (T5, §10 Q7:
+        `answer` backs "click a past question, see its real answer"
+        (FR-7); `source` backs the dashboard-vs-CLI split in §5)."""
         with self._conn:
             self._conn.execute(
-                "INSERT INTO query_log (asked_at, question, repos, num_results, latency_ms) VALUES (?, ?, ?, ?, ?)",
-                (datetime.now(timezone.utc).isoformat(), question, ",".join(repos), num_results, latency_ms),
+                "INSERT INTO query_log (asked_at, question, repos, num_results, latency_ms, answer, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    question,
+                    ",".join(repos),
+                    num_results,
+                    latency_ms,
+                    answer,
+                    source,
+                ),
             )
 
     def queries_since(self, since: datetime) -> int:
@@ -217,6 +267,37 @@ class Store:
             "SELECT COUNT(*) FROM query_log WHERE asked_at >= ?", (since.isoformat(),)
         ).fetchone()
         return count
+
+    def queries_since_by_source(self, since: datetime) -> dict[str, int]:
+        """Same count as `queries_since`, split by `source` (§5's
+        dashboard-vs-CLI metric, T5)."""
+        rows = self._conn.execute(
+            "SELECT source, COUNT(*) FROM query_log WHERE asked_at >= ? GROUP BY source", (since.isoformat(),)
+        ).fetchall()
+        return dict(rows)
+
+    def recent_queries(self, limit: int = 20) -> list[QueryLogRow]:
+        """The most recent queries, newest first, each carrying its own
+        answer (FR-7, T5) — a click on one is just displaying data already
+        fetched, no second lookup needed."""
+        rows = self._conn.execute(
+            "SELECT id, asked_at, question, repos, answer, source, num_results, latency_ms "
+            "FROM query_log ORDER BY asked_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            QueryLogRow(
+                id=id_,
+                asked_at=asked_at,
+                question=question,
+                repos=repos.split(",") if repos else [],
+                answer=answer,
+                source=source,
+                num_results=num_results,
+                latency_ms=latency_ms,
+            )
+            for id_, asked_at, question, repos, answer, source, num_results, latency_ms in rows
+        ]
 
     def create_job(self, repo: str) -> int:
         """Start tracking a new reindex job for `repo`. Raises

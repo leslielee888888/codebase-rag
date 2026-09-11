@@ -374,6 +374,73 @@ def test_cancel_reindex_flags_a_running_job(tmp_path: Path, monkeypatch):
         assert store.is_job_cancel_requested(body["job_id"]) is True
 
 
+def test_stats_with_nothing_indexed_returns_zeros(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = client.get("/stats")
+
+    assert result.status_code == 200, result.text
+    assert result.json() == {"queries_this_week": 0, "queries_this_week_by_source": {}}
+
+
+def test_stats_splits_queries_by_source(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _index_one_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(api_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+    monkeypatch.setattr(api_module, "ClaudeGenerator", _FakeGenerator)
+
+    assert client.post("/query", json={"question": "from the dashboard"}).status_code == 200
+    with Store(DEFAULT_DB_PATH) as store:
+        store.log_query("from the cli", ["demo"], num_results=1, latency_ms=1, source="cli")
+
+    result = client.get("/stats")
+
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["queries_this_week"] == 2
+    assert body["queries_this_week_by_source"] == {"dashboard": 1, "cli": 1}
+
+
+def test_history_with_nothing_logged_returns_empty_list(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = client.get("/history")
+
+    assert result.status_code == 200, result.text
+    assert result.json() == {"entries": []}
+
+
+def test_history_shows_each_entrys_real_answer(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _index_one_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(api_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+    monkeypatch.setattr(api_module, "ClaudeGenerator", _FakeGenerator)
+
+    assert client.post("/query", json={"question": "how does export work?"}).status_code == 200
+
+    result = client.get("/history")
+
+    assert result.status_code == 200, result.text
+    [entry] = result.json()["entries"]
+    assert entry["question"] == "how does export work?"
+    assert "Fake grounded answer" in entry["answer"]
+    assert entry["source"] == "dashboard"
+    assert entry["repos"] == ["demo"]
+
+
+def test_history_respects_the_limit_param(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        for i in range(5):
+            store.log_query(f"q{i}", ["demo"], num_results=1, latency_ms=1, source="dashboard")
+
+    result = client.get("/history", params={"limit": 2})
+
+    assert result.status_code == 200, result.text
+    assert len(result.json()["entries"]) == 2
+
+
 def test_repos_lists_configured_repos_with_indexed_state_and_timestamp(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _index_one_repo(tmp_path, monkeypatch, repo="demo")
