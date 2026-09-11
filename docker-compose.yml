@@ -1,0 +1,53 @@
+# codebase-rag — NAS deployment (T10).
+#
+#   Bring up Ollama (once, stays running):  docker compose up -d ollama
+#   Run the CLI (per invocation, exits when done — it's a CLI, not a server, §7).
+#   Note: the image's ENTRYPOINT is already `codebase-rag` — don't repeat it:
+#     docker compose run --rm app index <repo>
+#     docker compose run --rm app query "..."
+#     docker compose run --rm app chat
+#   Update:   docker compose pull && docker compose up -d ollama
+#   Logs:     docker compose logs -f ollama
+#   Rollback: set IMAGE_TAG in .env to the previous release, then re-pull
+#
+# CI publishes the image to GHCR on every `v*` tag (.github/workflows/image.yml).
+# The NAS never builds — it pulls. Indexed data lives in the `codebase-rag-data`
+# named volume (SQLite, §10 Q3) and survives every `run`/`pull`/restart.
+# `ollama-models` similarly persists the pulled embedding model.
+services:
+  app:
+    image: ghcr.io/leslielee888888/codebase-rag:${IMAGE_TAG:-latest}
+    env_file:
+      - .env
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      # A repo config.yaml names must actually be readable inside the
+      # container. Put (or bind-mount) each repo's checkout under
+      # ./repos/<name> on the NAS share and point config.yaml at
+      # /repos/<name> — see config.example.yaml.
+      - ./repos:/repos:ro
+      - codebase-rag-data:/app/data
+    depends_on:
+      - ollama
+    # No `restart:` policy, deliberately: this is a CLI, so `up -d` on this
+    # service would run it once (Typer prints help, exits 0), then loop
+    # forever restarting. Invoke it with `run --rm` (see above), not `up`.
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: codebase-rag-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    # CPU-only — the NAS (Celeron J4125) has no GPU. First bring-up needs
+    # one manual model pull, since qwen3-embedding:0.6b isn't baked into the
+    # base ollama/ollama image:
+    #   docker compose exec ollama ollama pull qwen3-embedding:0.6b
+
+volumes:
+  codebase-rag-data:
+    name: codebase-rag-data
+  ollama-models:
+    name: codebase-rag-ollama-models

@@ -1,0 +1,14 @@
+# Copy this to config.yaml and fill in your real repo paths.
+# config.yaml is git-ignored — it names local paths, never checked in.
+#
+# Running locally (no Docker): use the real path on this machine, e.g.
+#   path: E:/workspace/ai-docs
+#
+# Running via `docker compose run` (NAS deployment): docker-compose.yml
+# bind-mounts ./repos into the container at /repos, so put/mount each repo's
+# checkout at ./repos/<name> on the NAS share and point path at /repos/<name>.
+repos:
+  - name: ai-docs
+    path: /repos/ai-docs
+  - name: aus-tax-lodge
+    path: /repos/aus-tax-lodge
