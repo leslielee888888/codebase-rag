@@ -31,6 +31,16 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_repo ON chunks(repo);
 CREATE INDEX IF NOT EXISTS idx_chunks_repo_file ON chunks(repo, file_path);
+
+CREATE TABLE IF NOT EXISTS query_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asked_at TEXT NOT NULL,
+    question TEXT NOT NULL,
+    repos TEXT NOT NULL,
+    num_results INTEGER NOT NULL,
+    latency_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_query_log_asked_at ON query_log(asked_at);
 """
 
 
@@ -116,3 +126,21 @@ class Store:
         ]
         scored.sort(key=lambda row: row[0], reverse=True)
         return scored[:top_k]
+
+    def log_query(self, question: str, repos: list[str], num_results: int, latency_ms: int) -> None:
+        """Record one query (§5/§9) — every query, its scope, result count, and
+        latency, so 'queries/week' is a count over this table, not separate
+        instrumentation."""
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO query_log (asked_at, question, repos, num_results, latency_ms) VALUES (?, ?, ?, ?, ?)",
+                (datetime.now(timezone.utc).isoformat(), question, ",".join(repos), num_results, latency_ms),
+            )
+
+    def queries_since(self, since: datetime) -> int:
+        """Count of queries logged at or after `since` — the §5 queries/week metric
+        is `queries_since(datetime.now(timezone.utc) - timedelta(days=7))`."""
+        (count,) = self._conn.execute(
+            "SELECT COUNT(*) FROM query_log WHERE asked_at >= ?", (since.isoformat(),)
+        ).fetchone()
+        return count

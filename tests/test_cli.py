@@ -188,6 +188,29 @@ def test_query_show_out_of_range_reports_cleanly_without_failing(tmp_path: Path,
     assert "no such citation" in result.output
 
 
+def test_query_logs_and_stats_reports_it(tmp_path: Path, monkeypatch):
+    """§5/§9: every query is logged, and 'stats' reports queries/week off that log."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+    monkeypatch.setattr(cli_module, "ClaudeGenerator", _FakeGenerator)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    assert runner.invoke(app, ["query", "first question"]).exit_code == 0
+    assert runner.invoke(app, ["query", "second question"]).exit_code == 0
+
+    result = runner.invoke(app, ["stats"])
+
+    assert result.exit_code == 0, result.output
+    assert "Queries in the last 7 days: 2" in result.output
+
+
 def test_query_command_scoped_to_unindexed_repo_errors_cleanly(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)

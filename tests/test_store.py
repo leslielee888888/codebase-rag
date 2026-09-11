@@ -1,5 +1,6 @@
 """Unit tests for store.py — a real temp-file SQLite DB, no network."""
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from codebase_rag.chunking import Chunk
@@ -52,3 +53,16 @@ def test_indexed_repos_lists_distinct_repos(tmp_path: Path):
         store.replace_repo_chunks("repo-b", [_chunk("repo-b", "y.py", "y")], [[1.0]])
 
         assert store.indexed_repos() == ["repo-a", "repo-b"]
+
+
+def test_log_query_and_queries_since_count_recent_queries(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.log_query("how does X work?", ["demo"], num_results=3, latency_ms=120)
+        store.log_query("what about Y?", ["demo", "other"], num_results=5, latency_ms=340)
+
+        last_week = store.queries_since(datetime.now(timezone.utc) - timedelta(days=7))
+        assert last_week == 2
+
+        # nothing should count as "since" a moment in the future
+        future = store.queries_since(datetime.now(timezone.utc) + timedelta(days=1))
+        assert future == 0

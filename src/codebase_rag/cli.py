@@ -6,6 +6,8 @@ one to ask a question, optionally scoped to specific repos.
 
 from __future__ import annotations
 
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -84,6 +86,7 @@ def query(
         typer.echo("Nothing indexed yet - run 'codebase-rag index <repo>' first.")
         raise typer.Exit(code=1)
 
+    started_at = time.monotonic()
     embed_client: EmbeddingClient = OllamaEmbeddingClient()
     try:
         [query_vector] = embed_client.embed([question])
@@ -115,6 +118,10 @@ def query(
         typer.echo(f"Generation failed: {exc}")
         raise typer.Exit(code=1) from exc
 
+    latency_ms = round((time.monotonic() - started_at) * 1000)
+    with Store(DEFAULT_DB_PATH) as store:
+        store.log_query(question, scope, num_results=len(chunks), latency_ms=latency_ms)
+
     typer.echo(answer)
     typer.echo("\nSources:")
     for i, c in enumerate(chunks, start=1):
@@ -126,6 +133,19 @@ def query(
             continue
         c = chunks[n - 1]
         typer.echo(f"\n--- [{n}] {c.citation} ---\n{c.content}")
+
+
+@app.command()
+def stats() -> None:
+    """Queries/week off the query log (§5, §9) — a count, not a dashboard."""
+    if not DEFAULT_DB_PATH.exists():
+        typer.echo("Nothing indexed yet - no queries logged.")
+        raise typer.Exit(code=1)
+
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    with Store(DEFAULT_DB_PATH) as store:
+        count = store.queries_since(since)
+    typer.echo(f"Queries in the last 7 days: {count}")
 
 
 if __name__ == "__main__":
