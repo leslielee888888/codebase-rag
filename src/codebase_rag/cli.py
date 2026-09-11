@@ -105,7 +105,7 @@ def _answer(question: str, scope: list[str], history: Optional[list[Turn]] = Non
     embed_client: EmbeddingClient = OllamaEmbeddingClient()
     generator: Generator = ClaudeGenerator()
     try:
-        result = answering.answer_question(question, scope, history, embed_client, generator)
+        result = answering.answer_question(question, scope, history, embed_client, generator, source="cli")
     except answering.EmbeddingFailedError as exc:
         typer.echo(f"Embedding failed: {exc}")
         raise typer.Exit(code=1) from exc

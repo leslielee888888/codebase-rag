@@ -69,20 +69,26 @@ def test_resolve_scope_raises_when_nothing_is_configured():
 def test_answer_question_raises_when_db_path_does_not_exist(tmp_path: Path):
     with pytest.raises(NothingIndexedError, match="Nothing indexed yet"):
         answer_question(
-            "anything", ["demo"], None, _FakeEmbeddingClient(), _FakeGenerator(), db_path=tmp_path / "missing.db"
+            "anything",
+            ["demo"],
+            None,
+            _FakeEmbeddingClient(),
+            _FakeGenerator(),
+            source="test",
+            db_path=tmp_path / "missing.db",
         )
 
 
 def test_answer_question_raises_on_embedding_failure(tmp_path: Path):
     db_path = _indexed_store(tmp_path)
     with pytest.raises(EmbeddingFailedError, match="Failed to connect to Ollama"):
-        answer_question("anything", ["demo"], None, _FailingEmbeddingClient(), _FakeGenerator(), db_path=db_path)
+        answer_question("anything", ["demo"], None, _FailingEmbeddingClient(), _FakeGenerator(), source="test", db_path=db_path)
 
 
 def test_answer_question_raises_on_unindexed_repo_in_scope(tmp_path: Path):
     db_path = _indexed_store(tmp_path)
     with pytest.raises(UnindexedRepoError) as exc_info:
-        answer_question("anything", ["demo", "other"], None, _FakeEmbeddingClient(), _FakeGenerator(), db_path=db_path)
+        answer_question("anything", ["demo", "other"], None, _FakeEmbeddingClient(), _FakeGenerator(), source="test", db_path=db_path)
     assert exc_info.value.repos == ["other"]
 
 
@@ -91,19 +97,19 @@ def test_answer_question_raises_when_nothing_matches(tmp_path: Path):
     with Store(db_path):
         pass  # creates the schema but indexes nothing
     with pytest.raises(NoMatchError):
-        answer_question("anything", [], None, _FakeEmbeddingClient(), _FakeGenerator(), db_path=db_path)
+        answer_question("anything", [], None, _FakeEmbeddingClient(), _FakeGenerator(), source="test", db_path=db_path)
 
 
 def test_answer_question_raises_on_generation_failure(tmp_path: Path):
     db_path = _indexed_store(tmp_path)
     with pytest.raises(GenerationFailedError, match="Claude API unreachable"):
-        answer_question("anything", ["demo"], None, _FakeEmbeddingClient(), _FailingGenerator(), db_path=db_path)
+        answer_question("anything", ["demo"], None, _FakeEmbeddingClient(), _FailingGenerator(), source="test", db_path=db_path)
 
 
 def test_answer_question_returns_answer_and_citations(tmp_path: Path):
     db_path = _indexed_store(tmp_path)
 
-    result = answer_question("how does f work?", ["demo"], None, _FakeEmbeddingClient(), _FakeGenerator(), db_path=db_path)
+    result = answer_question("how does f work?", ["demo"], None, _FakeEmbeddingClient(), _FakeGenerator(), source="test", db_path=db_path)
 
     assert isinstance(result, AnswerResult)
     assert "Fake grounded answer" in result.answer
@@ -117,7 +123,7 @@ def test_answer_question_folds_prior_turn_into_retrieval_and_generation(tmp_path
     history = [("first question", "first answer")]
 
     result = answer_question(
-        "follow-up", ["demo"], history, _FakeEmbeddingClient(), _FakeGenerator(), db_path=db_path
+        "follow-up", ["demo"], history, _FakeEmbeddingClient(), _FakeGenerator(), source="test", db_path=db_path
     )
 
     assert "[1 prior turn(s)]" in result.answer
@@ -126,9 +132,22 @@ def test_answer_question_folds_prior_turn_into_retrieval_and_generation(tmp_path
 def test_answer_question_logs_the_query(tmp_path: Path):
     db_path = _indexed_store(tmp_path)
 
-    answer_question("anything", ["demo"], None, _FakeEmbeddingClient(), _FakeGenerator(), db_path=db_path)
+    answer_question("anything", ["demo"], None, _FakeEmbeddingClient(), _FakeGenerator(), source="test", db_path=db_path)
 
     with Store(db_path) as store:
         from datetime import datetime, timedelta, timezone
 
         assert store.queries_since(datetime.now(timezone.utc) - timedelta(minutes=1)) == 1
+
+
+def test_answer_question_logs_the_answer_and_source(tmp_path: Path):
+    db_path = _indexed_store(tmp_path)
+
+    answer_question(
+        "anything", ["demo"], None, _FakeEmbeddingClient(), _FakeGenerator(), source="cli", db_path=db_path
+    )
+
+    with Store(db_path) as store:
+        [logged] = store.recent_queries(limit=1)
+        assert logged.source == "cli"
+        assert "Fake grounded answer" in logged.answer

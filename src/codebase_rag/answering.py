@@ -84,12 +84,15 @@ def answer_question(
     history: list[Turn] | None,
     embed_client: EmbeddingClient,
     generator: Generator,
+    source: str,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> AnswerResult:
     """Embed `question` (folding in the prior turn if there is one, FR-6),
     search `scope`, generate a grounded answer, and log the query. Callers
     supply their own `embed_client`/`generator` — this stays a pure pipeline,
-    not a place that decides which concrete client to construct."""
+    not a place that decides which concrete client to construct. `source`
+    ("cli" or "dashboard") is logged alongside the query (T5, §10 Q7) so
+    §5's dashboard-vs-CLI split is a real, queryable signal."""
     if not db_path.exists():
         raise NothingIndexedError("Nothing indexed yet - run 'codebase-rag index <repo>' first.")
 
@@ -128,6 +131,8 @@ def answer_question(
 
     latency_ms = round((time.monotonic() - started_at) * 1000)
     with Store(db_path) as store:
-        store.log_query(question, scope, num_results=len(chunks), latency_ms=latency_ms)
+        store.log_query(
+            question, scope, num_results=len(chunks), latency_ms=latency_ms, answer=answer, source=source
+        )
 
     return AnswerResult(answer=answer, chunks=chunks, latency_ms=latency_ms)

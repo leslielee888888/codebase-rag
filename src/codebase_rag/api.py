@@ -12,6 +12,7 @@ Run locally with `uvicorn codebase_rag.api:app --reload`, or via the
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -87,6 +88,24 @@ class ReposResponse(BaseModel):
     repos: list[RepoOut]
 
 
+class StatsResponse(BaseModel):
+    queries_this_week: int
+    queries_this_week_by_source: dict[str, int]
+
+
+class HistoryEntryOut(BaseModel):
+    id: int
+    asked_at: str
+    question: str
+    answer: str | None
+    source: str
+    repos: list[str]
+
+
+class HistoryResponse(BaseModel):
+    entries: list[HistoryEntryOut]
+
+
 class JobOut(BaseModel):
     job_id: int
     repo: str
@@ -112,6 +131,39 @@ class JobOut(BaseModel):
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/stats", response_model=StatsResponse)
+def stats() -> StatsResponse:
+    """Queries/week, split dashboard vs. CLI (§5, T5) — the real,
+    queryable signal on whether the dashboard displaced day-to-day CLI
+    use."""
+    if not DEFAULT_DB_PATH.exists():
+        return StatsResponse(queries_this_week=0, queries_this_week_by_source={})
+    since = datetime.now(timezone.utc) - timedelta(days=7)
+    with Store(DEFAULT_DB_PATH) as store:
+        total = store.queries_since(since)
+        by_source = store.queries_since_by_source(since)
+    return StatsResponse(queries_this_week=total, queries_this_week_by_source=by_source)
+
+
+@app.get("/history", response_model=HistoryResponse)
+def history(limit: int = 20) -> HistoryResponse:
+    """Recent questions, each carrying its own stored answer (FR-7, T5) —
+    clicking one in the UI shows the real original answer, not just the
+    question text."""
+    if not DEFAULT_DB_PATH.exists():
+        return HistoryResponse(entries=[])
+    with Store(DEFAULT_DB_PATH) as store:
+        rows = store.recent_queries(limit=limit)
+    return HistoryResponse(
+        entries=[
+            HistoryEntryOut(
+                id=r.id, asked_at=r.asked_at, question=r.question, answer=r.answer, source=r.source, repos=r.repos
+            )
+            for r in rows
+        ]
+    )
 
 
 @app.get("/repos", response_model=ReposResponse)
@@ -222,7 +274,9 @@ def query(request: QueryRequest) -> QueryResponse:
     generator: Generator = ClaudeGenerator()
     try:
         scope = answering.resolve_scope(request.repos, config.repo_names())
-        result = answering.answer_question(request.question, scope, request.history, embed_client, generator)
+        result = answering.answer_question(
+            request.question, scope, request.history, embed_client, generator, source="dashboard"
+        )
     except answering.AnsweringError as exc:
         raise HTTPException(status_code=_status_for(exc), detail=str(exc)) from exc
 

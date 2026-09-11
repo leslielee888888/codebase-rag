@@ -116,6 +116,76 @@ def test_log_query_and_queries_since_count_recent_queries(tmp_path: Path):
         assert future == 0
 
 
+def test_log_query_defaults_source_to_dashboard_when_unspecified(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.log_query("anything", ["demo"], num_results=1, latency_ms=10)
+
+        [logged] = store.recent_queries(limit=1)
+        assert logged.source == "dashboard"
+        assert logged.answer is None
+
+
+def test_log_query_records_the_answer_and_source(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.log_query(
+            "how does X work?", ["demo"], num_results=3, latency_ms=120, answer="X works by...", source="cli"
+        )
+
+        [logged] = store.recent_queries(limit=1)
+        assert logged.question == "how does X work?"
+        assert logged.answer == "X works by..."
+        assert logged.source == "cli"
+        assert logged.repos == ["demo"]
+
+
+def test_recent_queries_returns_newest_first_and_respects_limit(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        for i in range(5):
+            store.log_query(f"question {i}", ["demo"], num_results=1, latency_ms=1, source="dashboard")
+
+        recent = store.recent_queries(limit=2)
+
+        assert [r.question for r in recent] == ["question 4", "question 3"]
+
+
+def test_queries_since_by_source_splits_the_count(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.log_query("q1", ["demo"], num_results=1, latency_ms=1, source="dashboard")
+        store.log_query("q2", ["demo"], num_results=1, latency_ms=1, source="dashboard")
+        store.log_query("q3", ["demo"], num_results=1, latency_ms=1, source="cli")
+
+        counts = store.queries_since_by_source(datetime.now(timezone.utc) - timedelta(days=7))
+
+        assert counts == {"dashboard": 2, "cli": 1}
+
+
+def test_existing_query_log_rows_from_before_the_schema_migration_get_defaults(tmp_path: Path):
+    """Simulates a pre-T5 NAS DB: a query_log row inserted against the old
+    3-column shape, before `answer`/`source` existed. Opening it with the
+    current Store must migrate the table in place (§10 Q7) rather than
+    erroring or losing the row."""
+    import sqlite3
+
+    db_path = tmp_path / "index.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE query_log (id INTEGER PRIMARY KEY AUTOINCREMENT, asked_at TEXT NOT NULL, "
+        "question TEXT NOT NULL, repos TEXT NOT NULL, num_results INTEGER NOT NULL, latency_ms INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO query_log (asked_at, question, repos, num_results, latency_ms) VALUES (?, ?, ?, ?, ?)",
+        (datetime.now(timezone.utc).isoformat(), "a pre-migration question", "demo", 1, 10),
+    )
+    conn.commit()
+    conn.close()
+
+    with Store(db_path) as store:
+        [row] = store.recent_queries(limit=1)
+        assert row.question == "a pre-migration question"
+        assert row.answer is None
+        assert row.source == "dashboard"  # the column default
+
+
 def test_cosine_with_precomputed_norm_matches_computing_it_internally():
     """search() hoists the query vector's norm out of the per-row loop —
     prove that shortcut gives the exact same answer as computing it fresh."""
