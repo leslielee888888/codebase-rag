@@ -14,7 +14,10 @@ import typer
 from codebase_rag.chunking import chunk_repo
 from codebase_rag.config import load_config
 from codebase_rag.embeddings import DEFAULT_MODEL, EmbeddingClient, OllamaEmbeddingClient
+from codebase_rag.generation import ClaudeGenerator, Generator, RetrievedChunk
 from codebase_rag.store import DEFAULT_DB_PATH, Store
+
+TOP_K = 8
 
 app = typer.Typer(
     name="codebase-rag",
@@ -67,15 +70,52 @@ def query(
         None, "--repo", help="Repo(s) to scope the query to (repeatable). Default: all indexed repos."
     ),
 ) -> None:
-    """Ask a question, grounded in retrieved source with citations."""
+    """Ask a question, grounded in retrieved source with citations (FR-2, FR-5)."""
     config = load_config()
     scope = repos or config.repo_names()
     if not scope:
         typer.echo("No repos configured yet - run 'codebase-rag index <repo>' first.")
         raise typer.Exit(code=1)
 
-    typer.echo(f"Querying {scope} for: {question!r}")
-    typer.echo("(retrieval/generation not implemented yet - see T3)")
+    if not DEFAULT_DB_PATH.exists():
+        typer.echo("Nothing indexed yet - run 'codebase-rag index <repo>' first.")
+        raise typer.Exit(code=1)
+
+    embed_client: EmbeddingClient = OllamaEmbeddingClient()
+    try:
+        [query_vector] = embed_client.embed([question])
+    except Exception as exc:
+        typer.echo(f"Embedding failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    with Store(DEFAULT_DB_PATH) as store:
+        known = set(store.indexed_repos())
+        unindexed = [r for r in scope if r not in known]
+        if unindexed:
+            typer.echo(f"Not indexed yet: {unindexed}. Run 'codebase-rag index <repo>' for each first.")
+            raise typer.Exit(code=1)
+        rows = store.search(query_vector, repos=scope, top_k=TOP_K)
+
+    if not rows:
+        typer.echo("No indexed content matched - nothing to answer from.")
+        raise typer.Exit(code=1)
+
+    chunks = [
+        RetrievedChunk(similarity=sim, repo=repo, file_path=path, start_line=start, end_line=end, content=content)
+        for sim, repo, path, start, end, content in rows
+    ]
+
+    generator: Generator = ClaudeGenerator()
+    try:
+        answer = generator.generate(question, chunks)
+    except Exception as exc:
+        typer.echo(f"Generation failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(answer)
+    typer.echo("\nSources:")
+    for i, c in enumerate(chunks, start=1):
+        typer.echo(f"  [{i}] {c.citation}")
 
 
 if __name__ == "__main__":
