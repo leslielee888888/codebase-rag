@@ -54,6 +54,37 @@ def test_index_command_chunks_embeds_and_persists(tmp_path: Path, monkeypatch):
     assert (tmp_path / "data" / "index.db").exists()
 
 
+def test_reindex_drops_stale_entries(tmp_path: Path, monkeypatch):
+    """FR-3: running `index` again on a changed repo is the reindex — stale
+    entries for deleted/renamed files are removed, not left dangling."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    old_file = repo_dir / "old.py"
+    old_file.write_text("def old(): ...", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    # the repo changes: old.py is renamed to new.py
+    old_file.unlink()
+    (repo_dir / "new.py").write_text("def new(): ...", encoding="utf-8")
+
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    from codebase_rag.store import DEFAULT_DB_PATH, Store
+
+    with Store(DEFAULT_DB_PATH) as store:
+        rows = store.search(query_vector=[0.0, 0.0], top_k=10)
+
+    file_paths = {row[2] for row in rows}
+    assert file_paths == {"new.py"}
+
+
 class _FakeGenerator:
     """Deterministic, network-free stand-in for ClaudeGenerator (FR-2)."""
 
