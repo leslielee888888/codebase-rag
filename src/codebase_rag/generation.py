@@ -27,9 +27,12 @@ import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
+from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+
 Turn = tuple[str, str]  # (question, answer)
 
 MODEL = "claude-sonnet-5"
+GENERATION_TIMEOUT_SECONDS = 120  # a hung subprocess must not block the CLI forever
 
 SYSTEM_PROMPT = (
     "You answer questions about a codebase using only the numbered source "
@@ -85,8 +88,6 @@ class ClaudeGenerator:
     async def _generate_async(
         self, question: str, chunks: list[RetrievedChunk], history: list[Turn] | None
     ) -> str:
-        from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
-
         options = ClaudeAgentOptions(
             model=self._model,
             system_prompt=SYSTEM_PROMPT,
@@ -94,8 +95,17 @@ class ClaudeGenerator:
             max_turns=1,  # single-shot Q&A, not an agentic session
         )
 
-        text_parts: list[str] = []
-        async for message in query(prompt=build_prompt(question, chunks, history), options=options):
-            if isinstance(message, AssistantMessage):
-                text_parts.extend(block.text for block in message.content if isinstance(block, TextBlock))
-        return "".join(text_parts)
+        async def collect() -> str:
+            text_parts: list[str] = []
+            async for message in query(prompt=build_prompt(question, chunks, history), options=options):
+                if isinstance(message, AssistantMessage):
+                    text_parts.extend(block.text for block in message.content if isinstance(block, TextBlock))
+            return "".join(text_parts)
+
+        # A hung or misbehaving subprocess must fail loudly, not block the CLI
+        # forever or hand back a silent "" that gets printed and logged as a
+        # successful, empty answer.
+        answer = await asyncio.wait_for(collect(), timeout=GENERATION_TIMEOUT_SECONDS)
+        if not answer.strip():
+            raise RuntimeError("Claude returned no text content — the Agent SDK call likely failed silently.")
+        return answer

@@ -12,6 +12,7 @@ for a one-page summary.
 
 ```sh
 cp config.example.yaml config.yaml   # fill in your real repo paths
+ollama pull qwen3-embedding:0.6b     # once, before the first index
 codebase-rag index <repo-name>
 codebase-rag query "how does X work?" --repo <repo-name>
 codebase-rag query "how does X work?" --show 1   # see the exact snippet behind citation [1]
@@ -27,15 +28,25 @@ generation goes through the Claude Agent SDK, not the raw Messages API; see
 ## NAS deployment
 
 ```sh
-cp .env.example .env   # fill in IMAGE_TAG and CLAUDE_CODE_OAUTH_TOKEN
+cp .env.example .env                 # fill in IMAGE_TAG and CLAUDE_CODE_OAUTH_TOKEN
+cp config.example.yaml config.yaml   # fill in real repo paths — see that file for the /repos/<name> convention
 docker compose up -d ollama
 docker compose exec ollama ollama pull qwen3-embedding:0.6b   # first bring-up only
-docker compose run --rm app codebase-rag index <repo-name>
+docker compose run --rm app index <repo-name>
+docker compose run --rm app query "how does X work?" --repo <repo-name>
+docker compose run --rm app chat
 ```
+
+The Dockerfile's `ENTRYPOINT` is already `codebase-rag` — don't repeat it in
+these commands (`docker compose run --rm app codebase-rag index ...` fails
+with "No such command 'codebase-rag'").
 
 `app` has no `restart:` policy on purpose — it's a CLI, invoked per command
 with `docker compose run --rm`, not a long-running server (§7). Only `ollama`
 stays up.
+
+If GHCR is unreachable, see `docker-compose.build.yml` for a local-build
+fallback (`docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`).
 
 ## Development
 

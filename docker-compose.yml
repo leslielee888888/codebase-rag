@@ -1,10 +1,11 @@
 # codebase-rag — NAS deployment (T10).
 #
 #   Bring up Ollama (once, stays running):  docker compose up -d ollama
-#   Run the CLI (per invocation, exits when done — it's a CLI, not a server, §7):
-#     docker compose run --rm app codebase-rag index <repo>
-#     docker compose run --rm app codebase-rag query "..."
-#     docker compose run --rm app codebase-rag chat
+#   Run the CLI (per invocation, exits when done — it's a CLI, not a server, §7).
+#   Note: the image's ENTRYPOINT is already `codebase-rag` — don't repeat it:
+#     docker compose run --rm app index <repo>
+#     docker compose run --rm app query "..."
+#     docker compose run --rm app chat
 #   Update:   docker compose pull && docker compose up -d ollama
 #   Logs:     docker compose logs -f ollama
 #   Rollback: set IMAGE_TAG in .env to the previous release, then re-pull
