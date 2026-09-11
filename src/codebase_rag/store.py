@@ -105,6 +105,19 @@ class Store:
                 ],
             )
 
+    def get_chunk(self, repo: str, file_path: str, start_line: int, end_line: int) -> str | None:
+        """Look up one chunk's exact content by its citation coordinates
+        (T2 of the dashboard PRD, FR-3) — re-fetches the snippet behind a
+        citation the query endpoint already returned, without carrying full
+        chunk content in every query response. Returns None if no chunk
+        matches (e.g. the repo was reindexed since the citation was given,
+        and its boundaries shifted)."""
+        row = self._conn.execute(
+            "SELECT content FROM chunks WHERE repo = ? AND file_path = ? AND start_line = ? AND end_line = ?",
+            (repo, file_path, start_line, end_line),
+        ).fetchone()
+        return row[0] if row else None
+
     def indexed_repos(self) -> list[str]:
         rows = self._conn.execute("SELECT DISTINCT repo FROM chunks ORDER BY repo").fetchall()
         return [r[0] for r in rows]
