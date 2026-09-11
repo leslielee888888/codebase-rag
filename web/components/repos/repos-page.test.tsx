@@ -26,6 +26,19 @@ describe("ReposPage", () => {
     expect(screen.getByText(/no repos configured yet/i)).toBeInTheDocument();
   });
 
+  it("FR-8a: the empty state offers the add-repo form", () => {
+    render(<ReposPage initialRepos={[]} initialReposError={null} />);
+    expect(screen.getByLabelText(/^name$/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^path$/i)).toBeInTheDocument();
+  });
+
+  it("FR-8a: the repos list also offers the add-repo form", async () => {
+    fetchReindexStatusMock.mockRejectedValue(new ApiError(404, "No reindex job found."));
+    render(<ReposPage initialRepos={repos} initialReposError={null} />);
+    expect(screen.getByLabelText(/^name$/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^path$/i)).toBeInTheDocument();
+  });
+
   it("shows a load error with retry when the initial /repos call fails", async () => {
     const user = userEvent.setup();
     fetchReindexStatusMock.mockRejectedValue(new ApiError(404, "No reindex job found."));

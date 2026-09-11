@@ -5,6 +5,7 @@ import { ApiError, fetchRepos } from "@/lib/api";
 import type { RepoInfo } from "@/lib/types";
 import { ReposLoadError } from "@/components/ask/repos-load-error";
 import { TopBar } from "@/components/ask/top-bar";
+import { AddRepoForm } from "./add-repo-form";
 import { EmptyState } from "./empty-state";
 import { RepoTable } from "./repo-table";
 
@@ -49,14 +50,17 @@ export function ReposPage({ initialRepos, initialReposError }: ReposPageProps) {
   }
 
   if (repos.length === 0) {
-    return <EmptyState />;
+    return <EmptyState onAdded={refreshRepos} />;
   }
 
   return (
     <>
       <TopBar title="Repos" />
       <div className="flex-1 overflow-y-auto p-6">
-        <RepoTable repos={repos} onReindexed={refreshRepos} />
+        <div className="flex flex-col gap-4">
+          <AddRepoForm onAdded={refreshRepos} />
+          <RepoTable repos={repos} onReindexed={refreshRepos} onRemoved={refreshRepos} />
+        </div>
       </div>
     </>
   );

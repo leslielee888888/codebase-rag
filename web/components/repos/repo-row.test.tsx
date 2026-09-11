@@ -5,10 +5,11 @@ import { RepoRow } from "./repo-row";
 import { ApiError } from "@/lib/api";
 import type { RepoInfo } from "@/lib/types";
 
-const { fetchReindexStatusMock, triggerReindexMock, cancelReindexMock } = vi.hoisted(() => ({
+const { fetchReindexStatusMock, triggerReindexMock, cancelReindexMock, removeRepoMock } = vi.hoisted(() => ({
   fetchReindexStatusMock: vi.fn(),
   triggerReindexMock: vi.fn(),
   cancelReindexMock: vi.fn(),
+  removeRepoMock: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async () => {
@@ -18,6 +19,7 @@ vi.mock("@/lib/api", async () => {
     fetchReindexStatus: fetchReindexStatusMock,
     triggerReindex: triggerReindexMock,
     cancelReindex: cancelReindexMock,
+    removeRepo: removeRepoMock,
   };
 });
 
@@ -44,7 +46,7 @@ describe("RepoRow", () => {
     render(
       <table>
         <tbody>
-          <RepoRow repo={unindexedRepo} onReindexed={vi.fn()} pollIntervalMs={POLL_MS} />
+          <RepoRow repo={unindexedRepo} onReindexed={vi.fn()} onRemoved={vi.fn()} pollIntervalMs={POLL_MS} />
         </tbody>
       </table>,
     );
@@ -59,7 +61,7 @@ describe("RepoRow", () => {
     render(
       <table>
         <tbody>
-          <RepoRow repo={indexedRepo} onReindexed={vi.fn()} pollIntervalMs={POLL_MS} />
+          <RepoRow repo={indexedRepo} onReindexed={vi.fn()} onRemoved={vi.fn()} pollIntervalMs={POLL_MS} />
         </tbody>
       </table>,
     );
@@ -74,7 +76,7 @@ describe("RepoRow", () => {
     render(
       <table>
         <tbody>
-          <RepoRow repo={unindexedRepo} onReindexed={onReindexed} pollIntervalMs={POLL_MS} />
+          <RepoRow repo={unindexedRepo} onReindexed={onReindexed} onRemoved={vi.fn()} pollIntervalMs={POLL_MS} />
         </tbody>
       </table>,
     );
@@ -128,7 +130,7 @@ describe("RepoRow", () => {
     render(
       <table>
         <tbody>
-          <RepoRow repo={indexedRepo} onReindexed={vi.fn()} pollIntervalMs={POLL_MS} />
+          <RepoRow repo={indexedRepo} onReindexed={vi.fn()} onRemoved={vi.fn()} pollIntervalMs={POLL_MS} />
         </tbody>
       </table>,
     );
@@ -149,7 +151,7 @@ describe("RepoRow", () => {
     render(
       <table>
         <tbody>
-          <RepoRow repo={unindexedRepo} onReindexed={vi.fn()} pollIntervalMs={POLL_MS} />
+          <RepoRow repo={unindexedRepo} onReindexed={vi.fn()} onRemoved={vi.fn()} pollIntervalMs={POLL_MS} />
         </tbody>
       </table>,
     );
@@ -202,7 +204,7 @@ describe("RepoRow", () => {
     render(
       <table>
         <tbody>
-          <RepoRow repo={unindexedRepo} onReindexed={vi.fn()} pollIntervalMs={POLL_MS} />
+          <RepoRow repo={unindexedRepo} onReindexed={vi.fn()} onRemoved={vi.fn()} pollIntervalMs={POLL_MS} />
         </tbody>
       </table>,
     );
@@ -240,12 +242,110 @@ describe("RepoRow", () => {
     render(
       <table>
         <tbody>
-          <RepoRow repo={indexedRepo} onReindexed={vi.fn()} pollIntervalMs={POLL_MS} />
+          <RepoRow repo={indexedRepo} onReindexed={vi.fn()} onRemoved={vi.fn()} pollIntervalMs={POLL_MS} />
         </tbody>
       </table>,
     );
 
     expect(await screen.findByText("10 / 50 chunks (20%)")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /cancel/i })).toBeInTheDocument();
+  });
+
+  describe("remove (FR-8b)", () => {
+    it("requires confirmation before calling DELETE /repos/{repo}", async () => {
+      fetchReindexStatusMock.mockRejectedValue(new ApiError(404, "No reindex job found."));
+      const onRemoved = vi.fn();
+      render(
+        <table>
+          <tbody>
+            <RepoRow repo={indexedRepo} onReindexed={vi.fn()} onRemoved={onRemoved} pollIntervalMs={POLL_MS} />
+          </tbody>
+        </table>,
+      );
+      await screen.findByRole("button", { name: /^remove$/i });
+
+      fireEvent.click(screen.getByRole("button", { name: /^remove$/i }));
+      expect(screen.getByText(/remove "codebase-rag"\?/i)).toBeInTheDocument();
+      expect(removeRepoMock).not.toHaveBeenCalled();
+
+      removeRepoMock.mockResolvedValue(undefined);
+      fireEvent.click(screen.getByRole("button", { name: /^remove$/i }));
+
+      await waitFor(() => expect(removeRepoMock).toHaveBeenCalledWith("codebase-rag"));
+      await waitFor(() => expect(onRemoved).toHaveBeenCalled());
+    });
+
+    it("backs out of the confirm step on Cancel without calling DELETE", async () => {
+      fetchReindexStatusMock.mockRejectedValue(new ApiError(404, "No reindex job found."));
+      render(
+        <table>
+          <tbody>
+            <RepoRow repo={indexedRepo} onReindexed={vi.fn()} onRemoved={vi.fn()} pollIntervalMs={POLL_MS} />
+          </tbody>
+        </table>,
+      );
+      await screen.findByRole("button", { name: /^remove$/i });
+
+      fireEvent.click(screen.getByRole("button", { name: /^remove$/i }));
+      fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+
+      expect(screen.queryByText(/remove "codebase-rag"\?/i)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^remove$/i })).toBeInTheDocument();
+      expect(removeRepoMock).not.toHaveBeenCalled();
+    });
+
+    it("surfaces a 404 (already gone) clearly and leaves the row usable", async () => {
+      fetchReindexStatusMock.mockRejectedValue(new ApiError(404, "No reindex job found."));
+      render(
+        <table>
+          <tbody>
+            <RepoRow repo={indexedRepo} onReindexed={vi.fn()} onRemoved={vi.fn()} pollIntervalMs={POLL_MS} />
+          </tbody>
+        </table>,
+      );
+      await screen.findByRole("button", { name: /^remove$/i });
+
+      fireEvent.click(screen.getByRole("button", { name: /^remove$/i }));
+      removeRepoMock.mockRejectedValue(new ApiError(404, "'codebase-rag' isn't in config.yaml."));
+      fireEvent.click(screen.getByRole("button", { name: /^remove$/i }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("'codebase-rag' isn't in config.yaml.");
+      expect(screen.getByRole("button", { name: /^remove$/i })).toBeInTheDocument();
+    });
+
+    it("removing a repo mid-reindex doesn't crash — the row simply unmounts on the next parent refresh", async () => {
+      fetchReindexStatusMock.mockRejectedValueOnce(new ApiError(404, "No reindex job found."));
+      const onRemoved = vi.fn();
+      const { unmount } = render(
+        <table>
+          <tbody>
+            <RepoRow repo={unindexedRepo} onReindexed={vi.fn()} onRemoved={onRemoved} pollIntervalMs={POLL_MS} />
+          </tbody>
+        </table>,
+      );
+      await screen.findByRole("button", { name: /reindex/i });
+
+      triggerReindexMock.mockResolvedValue({
+        job_id: 5,
+        repo: "ai-docs",
+        status: "running",
+        total_chunks: null,
+        embedded_chunks: 0,
+        cancel_requested: false,
+        error: null,
+      });
+      fireEvent.click(screen.getByRole("button", { name: /reindex/i }));
+      await screen.findByRole("button", { name: /cancel/i });
+
+      removeRepoMock.mockResolvedValue(undefined);
+      fireEvent.click(screen.getByRole("button", { name: /^remove$/i }));
+      fireEvent.click(screen.getByRole("button", { name: /^remove$/i }));
+      await waitFor(() => expect(onRemoved).toHaveBeenCalled());
+
+      // Simulates the parent dropping this row once its refetch settles
+      // (the real trigger for this unmount) — the row's own poll-cleanup
+      // effect must not throw when torn down mid-poll.
+      expect(() => unmount()).not.toThrow();
+    });
   });
 });
