@@ -132,3 +132,16 @@ def test_ssh_and_aws_directories_are_never_walked(tmp_path: Path):
     found = {p.name for p in iter_source_files(tmp_path)}
 
     assert found == {"app.py"}
+
+
+def test_ignored_directory_pruning_is_case_insensitive(tmp_path: Path):
+    """README claims exclusion is case-insensitive across the board — the
+    directory-name pruning has to actually honor that, not just the
+    filename-pattern checks in _is_sensitive."""
+    (tmp_path / "app.py").write_text("print('hi')", encoding="utf-8")
+    (tmp_path / "NODE_MODULES").mkdir()
+    (tmp_path / "NODE_MODULES" / "lib.js").write_text("noise", encoding="utf-8")
+
+    found = {p.name for p in iter_source_files(tmp_path)}
+
+    assert found == {"app.py"}

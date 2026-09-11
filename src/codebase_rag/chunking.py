@@ -83,9 +83,12 @@ def _is_indexable(path: Path) -> bool:
 
 
 def iter_source_files(root: Path):
-    """Yield every indexable file under `root`, skipping ignored directories."""
+    """Yield every indexable file under `root`, skipping ignored directories.
+    Matched case-insensitively — same guarantee as `_is_sensitive` — so a
+    `.SSH` or `.AWS` directory (or `.Git`, `Node_Modules`, ...) is pruned too,
+    not just the exact-lowercase spelling."""
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRS]
+        dirnames[:] = [d for d in dirnames if d.lower() not in IGNORED_DIRS]
         for filename in filenames:
             path = Path(dirpath) / filename
             if _is_indexable(path):

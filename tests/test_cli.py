@@ -397,6 +397,31 @@ def test_chat_carries_prior_turn_as_context_into_follow_ups(tmp_path: Path, monk
     assert "[1 prior turn(s)] Fake grounded answer to 'second question'" in result.output
 
 
+def test_chat_history_passed_to_generation_is_capped(tmp_path: Path, monkeypatch):
+    """A long chat session must not resend the whole conversation forever —
+    only the most recent MAX_CHAT_HISTORY_TURNS turns go to the generator."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+    monkeypatch.setattr(cli_module, "ClaudeGenerator", _FakeGenerator)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("def export_package(): ...", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    turn_count = cli_module.MAX_CHAT_HISTORY_TURNS + 3
+    questions = "\n".join(f"question {i}" for i in range(turn_count))
+    result = runner.invoke(app, ["chat"], input=f"{questions}\n\n")
+
+    assert result.exit_code == 0, result.output
+    # the final turn's generator call must be capped, not turn_count - 1
+    assert f"[{cli_module.MAX_CHAT_HISTORY_TURNS} prior turn(s)]" in result.output
+    assert f"[{turn_count - 1} prior turn(s)]" not in result.output
+
+
 def test_chat_blank_line_exits_cleanly(tmp_path: Path, monkeypatch):
     """A bare Enter must exit immediately, not re-prompt forever — typer.prompt's
     default behavior re-asks on blank input, which would silently break this."""

@@ -24,6 +24,12 @@ from codebase_rag.store import DEFAULT_DB_PATH, Store
 
 TOP_K = 8
 EMBED_BATCH_SIZE = 20
+# Caps how many prior turns go into the generation prompt (FR-6). Without
+# this, build_prompt() resends the whole conversation every turn — prompt
+# size grows O(n) per turn and cumulative tokens sent over an n-turn session
+# grow O(n^2). Retrieval already only ever looks at the single most recent
+# turn (see embed_text below), so this only bounds the generation side.
+MAX_CHAT_HISTORY_TURNS = 6
 
 app = typer.Typer(
     name="codebase-rag",
@@ -133,8 +139,9 @@ def _answer(question: str, scope: list[str], history: Optional[list[Turn]] = Non
     ]
 
     generator: Generator = ClaudeGenerator()
+    capped_history = history[-MAX_CHAT_HISTORY_TURNS:] if history else history
     try:
-        answer = generator.generate(question, chunks, history)
+        answer = generator.generate(question, chunks, capped_history)
     except Exception as exc:
         typer.echo(f"Generation failed: {exc}")
         raise typer.Exit(code=1) from exc

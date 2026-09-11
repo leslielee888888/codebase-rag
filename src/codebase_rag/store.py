@@ -54,9 +54,15 @@ def _from_blob(blob: bytes) -> list[float]:
     return list(a)
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
+def _cosine(a: list[float], b: list[float], norm_a: float | None = None) -> float:
+    """Cosine similarity. `a` is the query vector — its norm is identical
+    across every row `search()` scores, so callers doing a batch of these
+    against the same `a` should compute it once and pass it in rather than
+    let every call recompute it (this is the dominant cost of a query on
+    the NAS's CPU — §10 Q5)."""
     dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
+    if norm_a is None:
+        norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
     if norm_a == 0 or norm_b == 0:
         return 0.0
@@ -120,8 +126,16 @@ class Store:
                 "SELECT repo, file_path, start_line, end_line, content, embedding FROM chunks"
             ).fetchall()
 
+        query_norm = math.sqrt(sum(x * x for x in query_vector))
         scored = [
-            (_cosine(query_vector, _from_blob(embedding)), repo, file_path, start_line, end_line, content)
+            (
+                _cosine(query_vector, _from_blob(embedding), norm_a=query_norm),
+                repo,
+                file_path,
+                start_line,
+                end_line,
+                content,
+            )
             for repo, file_path, start_line, end_line, content, embedding in rows
         ]
         scored.sort(key=lambda row: row[0], reverse=True)

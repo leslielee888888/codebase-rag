@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from codebase_rag.chunking import Chunk
-from codebase_rag.store import Store
+from codebase_rag.store import Store, _cosine
 
 
 def _chunk(repo: str, file_path: str, content: str) -> Chunk:
@@ -66,3 +66,36 @@ def test_log_query_and_queries_since_count_recent_queries(tmp_path: Path):
         # nothing should count as "since" a moment in the future
         future = store.queries_since(datetime.now(timezone.utc) + timedelta(days=1))
         assert future == 0
+
+
+def test_cosine_with_precomputed_norm_matches_computing_it_internally():
+    """search() hoists the query vector's norm out of the per-row loop —
+    prove that shortcut gives the exact same answer as computing it fresh."""
+    a = [3.0, 4.0, 0.0]  # norm 5
+    b = [1.0, 0.0, 0.0]
+
+    computed = _cosine(a, b)
+    precomputed = _cosine(a, b, norm_a=5.0)
+
+    assert computed == precomputed
+
+
+def test_cosine_zero_vector_returns_zero_not_a_division_error():
+    assert _cosine([0.0, 0.0], [1.0, 1.0]) == 0.0
+    assert _cosine([1.0, 1.0], [0.0, 0.0]) == 0.0
+    assert _cosine([1.0, 1.0], [0.0, 0.0], norm_a=0.0) == 0.0
+
+
+def test_search_top_k_truncates_to_the_best_matches(tmp_path: Path):
+    """The scored[:top_k] slice that actually caps results — exercised with
+    more matches than top_k, not just exactly top_k or fewer."""
+    with Store(tmp_path / "index.db") as store:
+        chunks = [_chunk("demo", f"f{i}.py", str(i)) for i in range(5)]
+        # similarity to [1, 0] increases with i via the x-component
+        embeddings = [[float(i), 1.0] for i in range(5)]
+        store.replace_repo_chunks("demo", chunks, embeddings)
+
+        results = store.search(query_vector=[1.0, 0.0], top_k=2)
+
+        assert len(results) == 2
+        assert [r[2] for r in results] == ["f4.py", "f3.py"]
