@@ -69,6 +69,9 @@ def query(
     repos: Optional[list[str]] = typer.Option(
         None, "--repo", help="Repo(s) to scope the query to (repeatable). Default: all indexed repos."
     ),
+    show: Optional[list[int]] = typer.Option(
+        None, "--show", help="Print the full snippet behind citation number(s) after the answer (FR-4)."
+    ),
 ) -> None:
     """Ask a question, grounded in retrieved source with citations (FR-2, FR-5)."""
     config = load_config()
@@ -116,6 +119,13 @@ def query(
     typer.echo("\nSources:")
     for i, c in enumerate(chunks, start=1):
         typer.echo(f"  [{i}] {c.citation}")
+
+    for n in show or []:
+        if not 1 <= n <= len(chunks):
+            typer.echo(f"\n--show {n}: no such citation (there are {len(chunks)}).")
+            continue
+        c = chunks[n - 1]
+        typer.echo(f"\n--- [{n}] {c.citation} ---\n{c.content}")
 
 
 if __name__ == "__main__":

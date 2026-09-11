@@ -147,6 +147,47 @@ def test_query_command_scopes_across_multiple_repos(tmp_path: Path, monkeypatch)
     assert "repo-b/b.py" in all_repos.output
 
 
+def test_query_show_prints_the_exact_snippet_behind_a_citation(tmp_path: Path, monkeypatch):
+    """FR-4: --show <n> shows the real retrieved content, not just a file link."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+    monkeypatch.setattr(cli_module, "ClaudeGenerator", _FakeGenerator)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("def export_package():\n    return build_zip()", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    result = runner.invoke(app, ["query", "how does export work?", "--show", "1"])
+
+    assert result.exit_code == 0, result.output
+    assert "[1] demo/app.py:1-2" in result.output
+    assert "def export_package():" in result.output
+    assert "return build_zip()" in result.output
+
+
+def test_query_show_out_of_range_reports_cleanly_without_failing(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+    monkeypatch.setattr(cli_module, "ClaudeGenerator", _FakeGenerator)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    result = runner.invoke(app, ["query", "anything", "--show", "99"])
+
+    assert result.exit_code == 0
+    assert "no such citation" in result.output
+
+
 def test_query_command_scoped_to_unindexed_repo_errors_cleanly(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
