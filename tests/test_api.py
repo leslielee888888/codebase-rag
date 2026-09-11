@@ -59,6 +59,15 @@ def _index_one_repo(tmp_path: Path, monkeypatch, repo: str = "demo") -> None:
     assert result.exit_code == 0, result.output
 
 
+def test_cors_allows_a_browser_origin_to_call_the_api():
+    """T7 surfaced this: the dashboard frontend calls this API client-side
+    from its own origin, which needs CORS regardless of deployment host."""
+    result = client.get("/health", headers={"Origin": "http://localhost:3000"})
+
+    assert result.status_code == 200
+    assert result.headers["access-control-allow-origin"] == "*"
+
+
 def test_health_reports_ok():
     result = client.get("/health")
 
