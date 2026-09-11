@@ -1,0 +1,25 @@
+[project]
+name = "codebase-rag"
+version = "0.1.0"
+description = "Cross-repo codebase RAG assistant: index multiple codebases, ask grounded, cited questions across all of them."
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    "pyyaml>=6.0",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+codebase-rag = "codebase_rag.cli:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

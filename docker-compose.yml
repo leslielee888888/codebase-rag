@@ -1,0 +1,24 @@
+# Placeholder stack (T1). T10 fills in the real deploy config and verifies
+# memory headroom against the NAS's actual specs (PRD §8/§11): Celeron J4125,
+# 3.7GB RAM total, ~1.7GB free alongside Leslie's other containers, no GPU.
+services:
+  app:
+    build: .
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - data:/app/data
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    # Model pull (Qwen3-Embedding-0.6B) and resource limits land in T10 —
+    # the NAS has no GPU, so this must stay CPU-only.
+
+volumes:
+  data:
+  ollama-models:
