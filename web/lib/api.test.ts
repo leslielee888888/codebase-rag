@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, askQuestion, fetchCitationSnippet, fetchRepos } from "./api";
+import {
+  ApiError,
+  askQuestion,
+  cancelReindex,
+  fetchCitationSnippet,
+  fetchReindexStatus,
+  fetchRepos,
+  triggerReindex,
+} from "./api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -90,6 +98,120 @@ describe("askQuestion", () => {
     await expect(askQuestion({ question: "q" })).rejects.toMatchObject({
       status: 409,
       message: "Nothing indexed yet.",
+    });
+  });
+});
+
+describe("triggerReindex", () => {
+  it("POSTs to /repos/{repo}/reindex and returns the initial job", async () => {
+    const job = {
+      job_id: 1,
+      repo: "codebase-rag",
+      status: "running",
+      total_chunks: null,
+      embedded_chunks: 0,
+      cancel_requested: false,
+      error: null,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(job, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(triggerReindex("codebase-rag")).resolves.toEqual(job);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/repos\/codebase-rag\/reindex$/);
+    expect(init.method).toBe("POST");
+  });
+
+  it("maps a 409 (already reindexing) response to a clear ApiError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ detail: "'codebase-rag' is already reindexing." }, 409)),
+    );
+
+    await expect(triggerReindex("codebase-rag")).rejects.toMatchObject({
+      status: 409,
+      message: "'codebase-rag' is already reindexing.",
+    });
+  });
+
+  it("URL-encodes the repo name", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        job_id: 1,
+        repo: "a/b",
+        status: "running",
+        total_chunks: null,
+        embedded_chunks: 0,
+        cancel_requested: false,
+        error: null,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await triggerReindex("a/b");
+
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toContain("/repos/a%2Fb/reindex");
+  });
+});
+
+describe("fetchReindexStatus", () => {
+  it("GETs /repos/{repo}/reindex and returns the job", async () => {
+    const job = {
+      job_id: 1,
+      repo: "codebase-rag",
+      status: "running",
+      total_chunks: 100,
+      embedded_chunks: 40,
+      cancel_requested: false,
+      error: null,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(job));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchReindexStatus("codebase-rag")).resolves.toEqual(job);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.method ?? undefined).toBeUndefined();
+  });
+
+  it("maps a 404 (no job ever run) response to an ApiError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ detail: "No reindex job found for 'codebase-rag'." }, 404)),
+    );
+
+    await expect(fetchReindexStatus("codebase-rag")).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("cancelReindex", () => {
+  it("DELETEs /repos/{repo}/reindex and returns the job with cancel_requested", async () => {
+    const job = {
+      job_id: 1,
+      repo: "codebase-rag",
+      status: "running",
+      total_chunks: 100,
+      embedded_chunks: 40,
+      cancel_requested: true,
+      error: null,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(job));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(cancelReindex("codebase-rag")).resolves.toEqual(job);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("maps a 409 (not currently reindexing) response to an ApiError", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ detail: "'codebase-rag' isn't currently reindexing." }, 409)),
+    );
+
+    await expect(cancelReindex("codebase-rag")).rejects.toMatchObject({
+      status: 409,
+      message: "'codebase-rag' isn't currently reindexing.",
     });
   });
 });
