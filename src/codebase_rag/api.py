@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from codebase_rag import answering
@@ -26,6 +27,19 @@ from codebase_rag.reindexing import run_reindex_job
 from codebase_rag.store import DEFAULT_DB_PATH, JobAlreadyRunningError, JobRow, Store
 
 app = FastAPI(title="codebase-rag dashboard API", version="0.1.0")
+
+# T7 surfaced this: the browser-facing dashboard (web/) calls this API
+# client-side (POST /query, GET /citation), which needs CORS regardless of
+# what host serves the frontend. Wide open, not an allow-list, matches the
+# PRD's already-accepted trust model (§8/§10 Q6: LAN-only, no auth, same as
+# every other self-hosted tool here) - there's no session or credential for
+# a cross-origin request to steal.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Maps each AnsweringError subclass to the HTTP status that best fits it —
 # a caller's fault worth surfacing distinctly (400/404/409) vs. an upstream
