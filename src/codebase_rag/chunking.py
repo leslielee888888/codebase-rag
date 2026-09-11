@@ -47,14 +47,14 @@ SENSITIVE_NAME_PREFIXES = (".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 
 
 def _is_sensitive(path: Path) -> bool:
-    name = path.name
+    name_lower = path.name.lower()
     if path.suffix.lower() in SENSITIVE_SUFFIXES:
         return True
-    if name.lower() in SENSITIVE_EXACT_NAMES:
+    if name_lower in SENSITIVE_EXACT_NAMES:
         return True
-    if name.startswith(SENSITIVE_NAME_PREFIXES):
+    if name_lower.startswith(SENSITIVE_NAME_PREFIXES):
         return True
-    return "credentials" in name.lower()
+    return "credentials" in name_lower
 
 
 @dataclass(frozen=True)

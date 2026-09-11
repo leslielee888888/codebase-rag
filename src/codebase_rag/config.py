@@ -18,9 +18,10 @@ DEFAULT_CONFIG_PATH = Path("config.yaml")
 
 
 class ConfigError(ValueError):
-    """config.yaml is malformed. Raised with a message naming the actual
-    problem, so cli.py can show it plainly instead of a raw KeyError/TypeError
-    traceback — see PR #13's review."""
+    """config.yaml is malformed — bad YAML syntax or a structure `load_config`
+    doesn't recognize. Raised with a message naming the actual problem, so
+    cli.py can show it plainly instead of a raw parser/KeyError/TypeError
+    traceback."""
 
 
 @dataclass(frozen=True)
@@ -53,7 +54,10 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
     if not text.strip():
         return Config(repos=[])
 
-    raw = yaml.safe_load(text)
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path}: invalid YAML — {exc}") from exc
     if raw is None:
         return Config(repos=[])
     if not isinstance(raw, dict):
@@ -62,7 +66,9 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             f"got {type(raw).__name__}."
         )
 
-    entries = raw.get("repos") or []
+    entries = raw.get("repos")
+    if entries is None:
+        entries = []
     if not isinstance(entries, list):
         raise ConfigError(f"{path}: 'repos' must be a list, got {type(entries).__name__}.")
 

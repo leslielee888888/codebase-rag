@@ -30,16 +30,21 @@ def test_query_with_no_repos_configured_errors_cleanly():
 
 
 def test_malformed_config_yaml_errors_cleanly_not_a_traceback(tmp_path: Path, monkeypatch):
-    """PR #13: a config.yaml entry missing 'name'/'path' used to raise a raw
-    KeyError. It must surface as a clean CLI message instead."""
+    """A config.yaml entry missing 'name'/'path' used to raise a raw KeyError.
+    It must surface as a clean CLI message instead — for both commands that
+    load config.yaml, not just `index`."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config.yaml").write_text("repos:\n  - path: /repos/demo\n", encoding="utf-8")
 
-    result = runner.invoke(app, ["index", "demo"])
+    index_result = runner.invoke(app, ["index", "demo"])
+    assert index_result.exit_code == 1
+    assert "Traceback" not in index_result.output
+    assert "is missing name" in index_result.output
 
-    assert result.exit_code == 1
-    assert "Traceback" not in result.output
-    assert "is missing name" in result.output
+    query_result = runner.invoke(app, ["query", "anything"])
+    assert query_result.exit_code == 1
+    assert "Traceback" not in query_result.output
+    assert "is missing name" in query_result.output
 
 
 class _FakeEmbeddingClient:

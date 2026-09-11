@@ -34,7 +34,7 @@ app = typer.Typer(
 
 def _load_config() -> Config:
     """`load_config()`, with a malformed config.yaml turned into a clean CLI
-    error instead of a raw traceback (PR #13)."""
+    error instead of a raw traceback."""
     try:
         return load_config()
     except ConfigError as exc:

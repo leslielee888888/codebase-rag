@@ -26,6 +26,24 @@ Needs an Ollama server running `qwen3-embedding:0.6b` (`OLLAMA_HOST`, default
 generation goes through the Claude Agent SDK, not the raw Messages API; see
 `generation.py`'s module docstring for why).
 
+## What gets excluded
+
+`index` skips three kinds of file so indexing stays fast and nothing sensitive
+ever gets embedded, stored, or sent to Claude (see `chunking.py` for the exact
+lists):
+
+- The usual noise: `.git`, `node_modules`, `.venv`, build/dist output, binaries
+  (images, archives, compiled files) and anything over 1MB.
+- Credentials, regardless of extension: `.env`/`.env.*`, `.pem`/`.key`/`.pfx`/
+  `.p12` files, `id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa` and their variants,
+  `.netrc`/`.npmrc`/`.pypirc`, anything named (or containing) `credentials`,
+  and everything under a `.ssh/` or `.aws/` directory — matched case-
+  insensitively, so `.ENV` and `ID_RSA` are excluded too.
+
+If a question's answer seems to be missing because the file was never
+indexed, this is why — check that filename against the lists above before
+assuming something else is wrong.
+
 ## NAS deployment
 
 ```sh

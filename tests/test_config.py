@@ -55,6 +55,16 @@ def test_load_config_parses_repo_entries(tmp_path: Path):
     ]
 
 
+def test_load_config_rejects_invalid_yaml_syntax(tmp_path: Path):
+    """A genuinely broken YAML file (not just an unexpected but valid
+    structure) must also become a ConfigError, not a raw yaml.YAMLError."""
+    path = tmp_path / "config.yaml"
+    path.write_text("repos:\n  - name: demo\n    path: [unclosed\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="invalid YAML"):
+        load_config(path)
+
+
 def test_load_config_rejects_a_non_mapping_top_level(tmp_path: Path):
     path = tmp_path / "config.yaml"
     path.write_text("- just\n- a\n- list\n", encoding="utf-8")

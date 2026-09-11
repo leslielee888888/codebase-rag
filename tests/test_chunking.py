@@ -88,17 +88,34 @@ def test_empty_file_produces_no_chunks(tmp_path: Path):
 
 
 def test_sensitive_files_are_never_indexed(tmp_path: Path):
-    """FR-1, hardened after PR #13's review: credentials never get embedded,
-    stored, or sent to Claude, regardless of what a real repo happens to have
-    checked in."""
+    """FR-1: credentials never get embedded, stored, or sent to Claude,
+    regardless of what a real repo happens to have checked in."""
     (tmp_path / "app.py").write_text("print('hi')", encoding="utf-8")
     (tmp_path / ".env").write_text("SECRET=abc123", encoding="utf-8")
     (tmp_path / ".env.production").write_text("SECRET=xyz789", encoding="utf-8")
     (tmp_path / "server.pem").write_text("-----BEGIN CERTIFICATE-----", encoding="utf-8")
     (tmp_path / "private.key").write_text("-----BEGIN PRIVATE KEY-----", encoding="utf-8")
+    (tmp_path / "client.pfx").write_text("binary-ish", encoding="utf-8")
+    (tmp_path / "client.p12").write_text("binary-ish", encoding="utf-8")
     (tmp_path / "id_rsa").write_text("-----BEGIN OPENSSH PRIVATE KEY-----", encoding="utf-8")
+    (tmp_path / "id_ecdsa").write_text("-----BEGIN EC PRIVATE KEY-----", encoding="utf-8")
+    (tmp_path / "id_dsa").write_text("-----BEGIN DSA PRIVATE KEY-----", encoding="utf-8")
     (tmp_path / "aws_credentials").write_text("aws_access_key_id=AKIA...", encoding="utf-8")
     (tmp_path / ".netrc").write_text("machine example.com login x password y", encoding="utf-8")
+    (tmp_path / ".npmrc").write_text("//registry.npmjs.org/:_authToken=abc", encoding="utf-8")
+    (tmp_path / ".pypirc").write_text("[pypi]\npassword = abc", encoding="utf-8")
+
+    found = {p.name for p in iter_source_files(tmp_path)}
+
+    assert found == {"app.py"}
+
+
+def test_sensitive_filename_matching_is_case_insensitive(tmp_path: Path):
+    """A filesystem doesn't care about case, and neither should this filter —
+    ID_RSA and .ENV are exactly as sensitive as id_rsa and .env."""
+    (tmp_path / "app.py").write_text("print('hi')", encoding="utf-8")
+    (tmp_path / "ID_RSA").write_text("-----BEGIN OPENSSH PRIVATE KEY-----", encoding="utf-8")
+    (tmp_path / "CREDENTIALS").write_text("aws_access_key_id=AKIA...", encoding="utf-8")
 
     found = {p.name for p in iter_source_files(tmp_path)}
 
