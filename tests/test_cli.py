@@ -114,10 +114,11 @@ def test_index_batches_embedding_across_many_files(tmp_path: Path, monkeypatch):
 
 
 class _FakeGenerator:
-    """Deterministic, network-free stand-in for ClaudeGenerator (FR-2)."""
+    """Deterministic, network-free stand-in for ClaudeGenerator (FR-2, FR-6)."""
 
-    def generate(self, question, chunks):
-        return f"Fake grounded answer to {question!r} using {len(chunks)} chunk(s)."
+    def generate(self, question, chunks, history=None):
+        prefix = f"[{len(history)} prior turn(s)] " if history else ""
+        return f"{prefix}Fake grounded answer to {question!r} using {len(chunks)} chunk(s)."
 
 
 def test_query_command_retrieves_and_generates_with_citations(tmp_path: Path, monkeypatch):
@@ -237,6 +238,49 @@ def test_query_logs_and_stats_reports_it(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "Queries in the last 7 days: 2" in result.output
+
+
+def test_chat_carries_prior_turn_as_context_into_follow_ups(tmp_path: Path, monkeypatch):
+    """FR-6: a follow-up question reuses the prior turn as context for both
+    retrieval (the embedded text includes it) and the answer (passed to
+    the generator as `history`)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+    monkeypatch.setattr(cli_module, "ClaudeGenerator", _FakeGenerator)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("def export_package(): ...", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    # two questions, then a blank line to exit the REPL
+    result = runner.invoke(app, ["chat"], input="first question\nsecond question\n\n")
+
+    assert result.exit_code == 0, result.output
+    # first turn has no prior history
+    assert "Fake grounded answer to 'first question'" in result.output
+    # second turn's generator call carried 1 prior turn
+    assert "[1 prior turn(s)] Fake grounded answer to 'second question'" in result.output
+
+
+def test_chat_with_no_input_exits_cleanly(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    result = runner.invoke(app, ["chat"], input="\n")
+
+    assert result.exit_code == 0, result.output
 
 
 def test_query_command_scoped_to_unindexed_repo_errors_cleanly(tmp_path: Path, monkeypatch):

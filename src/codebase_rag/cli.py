@@ -1,7 +1,10 @@
-"""CLI entrypoint: `codebase-rag index` and `codebase-rag query`.
+"""CLI entrypoint: `codebase-rag index`, `query`, `chat`, and `stats`.
 
-Two commands cover the whole flow (PRD §7): one to index/reindex a codebase,
-one to ask a question, optionally scoped to specific repos.
+`index`/`query` cover the core flow (PRD §7): one to index/reindex a
+codebase, one to ask a question, optionally scoped to specific repos.
+`chat` (FR-6) is the same retrieval/generation path with conversation
+history carried across turns. `stats` reads the §5 queries/week metric off
+the query log.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ import typer
 from codebase_rag.chunking import chunk_repo
 from codebase_rag.config import load_config
 from codebase_rag.embeddings import DEFAULT_MODEL, EmbeddingClient, OllamaEmbeddingClient
-from codebase_rag.generation import ClaudeGenerator, Generator, RetrievedChunk
+from codebase_rag.generation import ClaudeGenerator, Generator, RetrievedChunk, Turn
 from codebase_rag.store import DEFAULT_DB_PATH, Store
 
 TOP_K = 8
@@ -73,31 +76,31 @@ def index(
     typer.echo(f"Indexed '{entry.name}': {len(chunks)} chunks -> {DEFAULT_DB_PATH}")
 
 
-@app.command()
-def query(
-    question: str = typer.Argument(..., help="The question to ask."),
-    repos: Optional[list[str]] = typer.Option(
-        None, "--repo", help="Repo(s) to scope the query to (repeatable). Default: all indexed repos."
-    ),
-    show: Optional[list[int]] = typer.Option(
-        None, "--show", help="Print the full snippet behind citation number(s) after the answer (FR-4)."
-    ),
-) -> None:
-    """Ask a question, grounded in retrieved source with citations (FR-2, FR-5)."""
+def _resolve_scope(repos: Optional[list[str]]) -> list[str]:
     config = load_config()
     scope = repos or config.repo_names()
     if not scope:
         typer.echo("No repos configured yet - run 'codebase-rag index <repo>' first.")
         raise typer.Exit(code=1)
+    return scope
 
+
+def _answer(question: str, scope: list[str], history: Optional[list[Turn]] = None) -> tuple[str, list[RetrievedChunk]]:
+    """Shared retrieve-then-generate path for `query` and `chat` (FR-2, FR-5, FR-6)."""
     if not DEFAULT_DB_PATH.exists():
         typer.echo("Nothing indexed yet - run 'codebase-rag index <repo>' first.")
         raise typer.Exit(code=1)
 
     started_at = time.monotonic()
     embed_client: EmbeddingClient = OllamaEmbeddingClient()
+    # A follow-up's retrieval considers the prior turn too (FR-6) — "what
+    # about the edge cases?" alone wouldn't retrieve anything useful.
+    embed_text = question
+    if history:
+        last_question, last_answer = history[-1]
+        embed_text = f"{last_question}\n{last_answer}\n{question}"
     try:
-        [query_vector] = embed_client.embed([question])
+        [query_vector] = embed_client.embed([embed_text])
     except Exception as exc:
         typer.echo(f"Embedding failed: {exc}")
         raise typer.Exit(code=1) from exc
@@ -121,7 +124,7 @@ def query(
 
     generator: Generator = ClaudeGenerator()
     try:
-        answer = generator.generate(question, chunks)
+        answer = generator.generate(question, chunks, history)
     except Exception as exc:
         typer.echo(f"Generation failed: {exc}")
         raise typer.Exit(code=1) from exc
@@ -130,6 +133,10 @@ def query(
     with Store(DEFAULT_DB_PATH) as store:
         store.log_query(question, scope, num_results=len(chunks), latency_ms=latency_ms)
 
+    return answer, chunks
+
+
+def _print_answer(answer: str, chunks: list[RetrievedChunk], show: Optional[list[int]] = None) -> None:
     typer.echo(answer)
     typer.echo("\nSources:")
     for i, c in enumerate(chunks, start=1):
@@ -141,6 +148,47 @@ def query(
             continue
         c = chunks[n - 1]
         typer.echo(f"\n--- [{n}] {c.citation} ---\n{c.content}")
+
+
+@app.command()
+def query(
+    question: str = typer.Argument(..., help="The question to ask."),
+    repos: Optional[list[str]] = typer.Option(
+        None, "--repo", help="Repo(s) to scope the query to (repeatable). Default: all indexed repos."
+    ),
+    show: Optional[list[int]] = typer.Option(
+        None, "--show", help="Print the full snippet behind citation number(s) after the answer (FR-4)."
+    ),
+) -> None:
+    """Ask a question, grounded in retrieved source with citations (FR-2, FR-5)."""
+    scope = _resolve_scope(repos)
+    answer, chunks = _answer(question, scope)
+    _print_answer(answer, chunks, show)
+
+
+@app.command()
+def chat(
+    repos: Optional[list[str]] = typer.Option(
+        None, "--repo", help="Repo(s) to scope the conversation to (repeatable). Default: all indexed repos."
+    ),
+) -> None:
+    """Interactive multi-turn conversation (FR-6) — a follow-up reuses the prior turn as context."""
+    scope = _resolve_scope(repos)
+    typer.echo(f"Chatting over {scope}. Blank line or Ctrl+D to exit.\n")
+
+    history: list[Turn] = []
+    while True:
+        try:
+            question = typer.prompt("Ask", prompt_suffix="> ")
+        except (typer.Abort, EOFError, KeyboardInterrupt):
+            break
+        if not question.strip():
+            break
+
+        answer, chunks = _answer(question, scope, history=history or None)
+        _print_answer(answer, chunks)
+        typer.echo("")
+        history.append((question, answer))
 
 
 @app.command()
