@@ -1,0 +1,6 @@
+# Local-build override (fallback: `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`).
+# Only for when GHCR is unreachable or an untagged local change needs testing
+# on the NAS directly — the house workflow is CI-built images (image.yml).
+services:
+  app:
+    build: .
