@@ -187,6 +187,14 @@ class Store:
         ).fetchone()
         return row[0] if row else None
 
+    def delete_repo_chunks(self, repo: str) -> None:
+        """Delete `repo`'s indexed chunks with no replacement (FR-8b, T6) —
+        unlike `replace_repo_chunks`, there's no fresh set to insert after:
+        removing a repo entry deletes its chunks immediately (§10 Q9), no
+        lingering, unlisted-but-still-searchable content."""
+        with self._conn:
+            self._conn.execute("DELETE FROM chunks WHERE repo = ?", (repo,))
+
     def indexed_repos(self) -> list[str]:
         rows = self._conn.execute("SELECT DISTINCT repo FROM chunks ORDER BY repo").fetchall()
         return [r[0] for r in rows]

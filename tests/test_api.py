@@ -441,6 +441,111 @@ def test_history_respects_the_limit_param(tmp_path: Path, monkeypatch):
     assert len(result.json()["entries"]) == 2
 
 
+def test_add_repo_appends_a_new_entry(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = client.post("/repos", json={"name": "new-repo", "path": "/repos/new-repo"})
+
+    assert result.status_code == 201, result.text
+    assert result.json() == {"name": "new-repo", "path": "/repos/new-repo", "indexed": False, "last_indexed_at": None}
+
+    listed = client.get("/repos").json()["repos"]
+    assert listed == [{"name": "new-repo", "path": "/repos/new-repo", "indexed": False, "last_indexed_at": None}]
+
+
+def test_add_repo_rejects_a_duplicate_name(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _configure_repo(tmp_path, name="demo")
+
+    result = client.post("/repos", json={"name": "demo", "path": "/somewhere/else"})
+
+    assert result.status_code == 409
+    assert "already configured" in result.json()["detail"]
+
+
+def test_add_repo_malformed_config_yaml_returns_400(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text("repos:\n  - path: /repos/demo\n", encoding="utf-8")
+
+    result = client.post("/repos", json={"name": "new-repo", "path": "/x"})
+
+    assert result.status_code == 400
+    assert "is missing name" in result.json()["detail"]
+
+
+def test_add_repo_missing_fields_returns_422(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = client.post("/repos", json={"name": "new-repo"})
+
+    assert result.status_code == 422
+
+
+def test_remove_repo_malformed_config_yaml_returns_400(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text("repos:\n  - path: /repos/demo\n", encoding="utf-8")
+
+    result = client.delete("/repos/demo")
+
+    assert result.status_code == 400
+    assert "is missing name" in result.json()["detail"]
+
+
+def test_remove_repo_unknown_name_returns_404(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = client.delete("/repos/nonexistent")
+
+    assert result.status_code == 404
+
+
+def test_remove_repo_deletes_the_config_entry_and_its_chunks(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _index_one_repo(tmp_path, monkeypatch)
+
+    result = client.delete("/repos/demo")
+
+    assert result.status_code == 204
+    assert client.get("/repos").json()["repos"] == []
+    with Store(DEFAULT_DB_PATH) as store:
+        assert store.indexed_repos() == []
+
+
+def test_remove_repo_leaves_other_repos_untouched(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # _index_one_repo overwrites config.yaml with a single entry each call,
+    # so restore both afterward - both repos are independently indexed in
+    # the DB either way, which is what this test actually exercises.
+    _index_one_repo(tmp_path, monkeypatch, repo="repo-a")
+    _index_one_repo(tmp_path, monkeypatch, repo="repo-b")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n"
+        f"  - name: repo-a\n    path: {(tmp_path / 'repo-a-repo').as_posix()}\n"
+        f"  - name: repo-b\n    path: {(tmp_path / 'repo-b-repo').as_posix()}\n",
+        encoding="utf-8",
+    )
+
+    result = client.delete("/repos/repo-a")
+
+    assert result.status_code == 204
+    remaining = {r["name"] for r in client.get("/repos").json()["repos"]}
+    assert remaining == {"repo-b"}
+    with Store(DEFAULT_DB_PATH) as store:
+        assert store.indexed_repos() == ["repo-b"]
+
+
+def test_remove_repo_never_indexed_still_removes_the_config_entry(tmp_path: Path, monkeypatch):
+    """FR-8b applies even when the DB doesn't exist yet at all - removal
+    must not require a prior index."""
+    monkeypatch.chdir(tmp_path)
+    _configure_repo(tmp_path, name="demo")
+
+    result = client.delete("/repos/demo")
+
+    assert result.status_code == 204
+    assert client.get("/repos").json()["repos"] == []
+
+
 def test_repos_lists_configured_repos_with_indexed_state_and_timestamp(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _index_one_repo(tmp_path, monkeypatch, repo="demo")
