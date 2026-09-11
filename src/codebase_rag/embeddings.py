@@ -7,10 +7,11 @@ against a fake client; only a real Ollama server exercises `OllamaEmbeddingClien
 
 from __future__ import annotations
 
+import os
 from typing import Protocol
 
 DEFAULT_MODEL = "qwen3-embedding:0.6b"
-DEFAULT_HOST = "http://localhost:11434"
+DEFAULT_HOST = "http://localhost:11434"  # local dev default; see OLLAMA_HOST below
 
 
 class EmbeddingClient(Protocol):
@@ -20,13 +21,17 @@ class EmbeddingClient(Protocol):
 
 
 class OllamaEmbeddingClient:
-    """Embeds via a local Ollama server (default: the NAS's `ollama` container)."""
+    """Embeds via an Ollama server. Host resolves from the `OLLAMA_HOST` env var
+    first (docker-compose.yml sets it to `http://ollama:11434` — inside the `app`
+    container, `localhost` would mean the app container itself, not the sibling
+    `ollama` service), falling back to `DEFAULT_HOST` for local dev outside Docker.
+    """
 
-    def __init__(self, model: str = DEFAULT_MODEL, host: str = DEFAULT_HOST):
+    def __init__(self, model: str = DEFAULT_MODEL, host: str | None = None):
         import ollama  # imported lazily so the CLI can start without it configured
 
         self._model = model
-        self._client = ollama.Client(host=host)
+        self._client = ollama.Client(host=host or os.environ.get("OLLAMA_HOST", DEFAULT_HOST))
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:

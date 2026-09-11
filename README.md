@@ -8,13 +8,34 @@ See the [PRD](https://github.com/leslielee888888/ai-docs/blob/main/docs/prd/code
 for the full spec, and the [explainer](https://claude.ai/code/artifact/dcf9164b-9532-4eef-917a-a4f909633c27)
 for a one-page summary.
 
-## Usage (once indexing/query are implemented — T2/T3)
+## Usage
 
 ```sh
 cp config.example.yaml config.yaml   # fill in your real repo paths
 codebase-rag index <repo-name>
 codebase-rag query "how does X work?" --repo <repo-name>
+codebase-rag query "how does X work?" --show 1   # see the exact snippet behind citation [1]
+codebase-rag chat                                # multi-turn conversation
+codebase-rag stats                                # queries in the last 7 days
 ```
+
+Needs an Ollama server running `qwen3-embedding:0.6b` (`OLLAMA_HOST`, default
+`http://localhost:11434`) and a Claude Code login (`CLAUDE_CODE_OAUTH_TOKEN` —
+generation goes through the Claude Agent SDK, not the raw Messages API; see
+`generation.py`'s module docstring for why).
+
+## NAS deployment
+
+```sh
+cp .env.example .env   # fill in IMAGE_TAG and CLAUDE_CODE_OAUTH_TOKEN
+docker compose up -d ollama
+docker compose exec ollama ollama pull qwen3-embedding:0.6b   # first bring-up only
+docker compose run --rm app codebase-rag index <repo-name>
+```
+
+`app` has no `restart:` policy on purpose — it's a CLI, invoked per command
+with `docker compose run --rm`, not a long-running server (§7). Only `ollama`
+stays up.
 
 ## Development
 

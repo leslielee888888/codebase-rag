@@ -1,10 +1,20 @@
 """Generation: Claude Sonnet 5 answers a question grounded in retrieved chunks (FR-2).
 
 Sonnet 5 over Opus 5 (§10 Q5) — grounded Q&A over retrieved source isn't
-frontier-reasoning work, and this runs per query. Auth is the SDK's default
-profile chain (subscription OAuth via `ant auth login`), never a hardcoded
-API key, per the standing preference — `anthropic.Anthropic()` with no args
-resolves it.
+frontier-reasoning work, and this runs per query.
+
+**Why this goes through the Claude Agent SDK, not the raw `anthropic` SDK:**
+the sibling `aus-tax-lodge` project already hit this exact wall on this same
+Anthropic org (T16) — a raw `messages.create()` call with the subscription
+OAuth token gets rejected with a `429 rate_limit_error`
+(`overageDisabledReason: "org_level_disabled"`), because raw API-style access
+outside the actual Claude Code product isn't enabled for this account at the
+org level. The fix there, which this mirrors: `claude_agent_sdk.query()`
+spawns the real Claude Code CLI as a subprocess, which authenticates the same
+`CLAUDE_CODE_OAUTH_TOKEN` successfully because it *is* Claude Code. The
+subprocess picks the token up from the environment on its own — nothing here
+passes a credential explicitly. This still needs a real authenticated call
+against the deployed NAS container to confirm (T10), the same way T16 did.
 
 `history` (FR-6) is the prior turns of a `chat` session: included in the
 prompt so a follow-up like "what about the edge cases?" resolves against
@@ -13,6 +23,7 @@ what was just discussed, not just the bare question.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -62,19 +73,29 @@ def build_prompt(question: str, chunks: list[RetrievedChunk], history: list[Turn
 
 
 class ClaudeGenerator:
-    """Generates via the Claude API (Sonnet 5, subscription OAuth auth)."""
+    """Generates via the Claude Agent SDK (Sonnet 5, subscription OAuth auth) —
+    see the module docstring for why not the raw Messages API."""
 
     def __init__(self, model: str = MODEL):
-        import anthropic  # imported lazily, mirrors OllamaEmbeddingClient
-
         self._model = model
-        self._client = anthropic.Anthropic()
 
     def generate(self, question: str, chunks: list[RetrievedChunk], history: list[Turn] | None = None) -> str:
-        response = self._client.messages.create(
+        return asyncio.run(self._generate_async(question, chunks, history))
+
+    async def _generate_async(
+        self, question: str, chunks: list[RetrievedChunk], history: list[Turn] | None
+    ) -> str:
+        from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+
+        options = ClaudeAgentOptions(
             model=self._model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": build_prompt(question, chunks, history)}],
+            system_prompt=SYSTEM_PROMPT,
+            tools=[],  # answer from the prompt's own sources only — no file/bash access
+            max_turns=1,  # single-shot Q&A, not an agentic session
         )
-        return "".join(block.text for block in response.content if block.type == "text")
+
+        text_parts: list[str] = []
+        async for message in query(prompt=build_prompt(question, chunks, history), options=options):
+            if isinstance(message, AssistantMessage):
+                text_parts.extend(block.text for block in message.content if isinstance(block, TextBlock))
+        return "".join(text_parts)
