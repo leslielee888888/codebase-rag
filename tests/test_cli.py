@@ -82,6 +82,40 @@ def test_query_command_retrieves_and_generates_with_citations(tmp_path: Path, mo
     assert "demo/app.py:1-1" in result.output
 
 
+def test_query_command_scopes_across_multiple_repos(tmp_path: Path, monkeypatch):
+    """FR-5: scope to one, several, or all indexed repos, and retrieval respects it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+    monkeypatch.setattr(cli_module, "ClaudeGenerator", _FakeGenerator)
+
+    repo_a = tmp_path / "repo-a"
+    repo_a.mkdir()
+    (repo_a / "a.py").write_text("def alpha(): ...", encoding="utf-8")
+    repo_b = tmp_path / "repo-b"
+    repo_b.mkdir()
+    (repo_b / "b.py").write_text("def beta(): ...", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n"
+        f"  - name: repo-a\n    path: {repo_a.as_posix()}\n"
+        f"  - name: repo-b\n    path: {repo_b.as_posix()}\n",
+        encoding="utf-8",
+    )
+    assert runner.invoke(app, ["index", "repo-a"]).exit_code == 0
+    assert runner.invoke(app, ["index", "repo-b"]).exit_code == 0
+
+    # scoped to one repo: only that repo's citation shows up
+    scoped = runner.invoke(app, ["query", "how does this work?", "--repo", "repo-a"])
+    assert scoped.exit_code == 0, scoped.output
+    assert "repo-a/a.py" in scoped.output
+    assert "repo-b/b.py" not in scoped.output
+
+    # no --repo: defaults to every indexed repo
+    all_repos = runner.invoke(app, ["query", "how does this work?"])
+    assert all_repos.exit_code == 0, all_repos.output
+    assert "repo-a/a.py" in all_repos.output
+    assert "repo-b/b.py" in all_repos.output
+
+
 def test_query_command_scoped_to_unindexed_repo_errors_cleanly(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
