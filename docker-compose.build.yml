@@ -4,3 +4,7 @@
 services:
   app:
     build: .
+  api:
+    build: .
+  web:
+    build: web
