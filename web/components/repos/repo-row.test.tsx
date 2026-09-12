@@ -117,6 +117,20 @@ describe("RepoRow", () => {
       cancel_requested: false,
       error: null,
     });
+    // A persistent (not "Once") default for the background poll this
+    // triggers — POLL_MS is a real timer, so without this, a poll tick that
+    // happens to land before the test's own next mockResolvedValueOnce call
+    // below would hit an unconfigured mock and crash the row into an error
+    // state instead of the progress it's meant to show.
+    fetchReindexStatusMock.mockResolvedValue({
+      job_id: 1,
+      repo: "ai-docs",
+      status: "running",
+      total_chunks: null,
+      embedded_chunks: 0,
+      cancel_requested: false,
+      error: null,
+    });
     fireEvent.click(screen.getByRole("button", { name: /reindex/i }));
 
     expect(await screen.findByText(/0 chunks embedded so far/i)).toBeInTheDocument();
@@ -192,6 +206,17 @@ describe("RepoRow", () => {
       cancel_requested: false,
       error: null,
     });
+    // Persistent default for any poll tick landing before Cancel is
+    // clicked below — see the identical comment in the FR-5a test above.
+    fetchReindexStatusMock.mockResolvedValue({
+      job_id: 2,
+      repo: "ai-docs",
+      status: "running",
+      total_chunks: 10,
+      embedded_chunks: 2,
+      cancel_requested: false,
+      error: null,
+    });
     fireEvent.click(screen.getByRole("button", { name: /reindex/i }));
     await screen.findByRole("button", { name: /cancel/i });
 
@@ -237,6 +262,17 @@ describe("RepoRow", () => {
     await screen.findByRole("button", { name: /reindex/i });
 
     triggerReindexMock.mockResolvedValue({
+      job_id: 3,
+      repo: "ai-docs",
+      status: "running",
+      total_chunks: null,
+      embedded_chunks: 0,
+      cancel_requested: false,
+      error: null,
+    });
+    // Persistent default for any poll tick landing before Cancel is
+    // clicked below — see the identical comment in the FR-5a test above.
+    fetchReindexStatusMock.mockResolvedValue({
       job_id: 3,
       repo: "ai-docs",
       status: "running",
@@ -352,6 +388,17 @@ describe("RepoRow", () => {
       await screen.findByRole("button", { name: /reindex/i });
 
       triggerReindexMock.mockResolvedValue({
+        job_id: 5,
+        repo: "ai-docs",
+        status: "running",
+        total_chunks: null,
+        embedded_chunks: 0,
+        cancel_requested: false,
+        error: null,
+      });
+      // Persistent default for any poll tick landing before Remove is
+      // clicked below — see the identical comment in the FR-5a test above.
+      fetchReindexStatusMock.mockResolvedValue({
         job_id: 5,
         repo: "ai-docs",
         status: "running",
