@@ -72,6 +72,84 @@ def test_index_command_chunks_embeds_and_persists(tmp_path: Path, monkeypatch):
     assert (tmp_path / "data" / "index.db").exists()
 
 
+def test_index_records_a_completed_job(tmp_path: Path, monkeypatch):
+    """The CLI's index command and the dashboard's reindex jobs (T4) share
+    one `jobs` table - a successful `index` run should leave a 'done' job
+    behind, not just the chunks themselves."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("print('hello')", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 0
+
+    from codebase_rag.store import DEFAULT_DB_PATH, Store
+
+    with Store(DEFAULT_DB_PATH) as store:
+        job = store.latest_job_for_repo("demo")
+    assert job is not None
+    assert job.status == "done"
+    assert job.embedded_chunks == 1
+
+
+def test_index_rejects_a_repo_the_dashboard_is_already_reindexing(tmp_path: Path, monkeypatch):
+    """FR-5/§10 Q11's "already reindexing" guard applies across surfaces -
+    a dashboard-triggered job for this repo must block a CLI `index` too,
+    since both write the same chunks table."""
+    monkeypatch.chdir(tmp_path)
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("print('hello')", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+
+    from codebase_rag.store import DEFAULT_DB_PATH, Store
+
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        store.create_job("demo")  # simulates a reindex the dashboard already started
+
+    result = runner.invoke(app, ["index", "demo"])
+
+    assert result.exit_code == 1
+    assert "already reindexing" in result.output
+
+
+def test_index_embedding_failure_marks_the_job_failed(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FailingEmbeddingClient)
+
+    repo_dir = tmp_path / "demo-repo"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"repos:\n  - name: demo\n    path: {repo_dir.as_posix()}\n", encoding="utf-8"
+    )
+
+    assert runner.invoke(app, ["index", "demo"]).exit_code == 1
+
+    from codebase_rag.store import DEFAULT_DB_PATH, Store
+
+    with Store(DEFAULT_DB_PATH) as store:
+        job = store.latest_job_for_repo("demo")
+    assert job is not None
+    assert job.status == "failed"
+    assert "Embedding failed" in job.error
+
+    # A failed job must not block a later retry (only a *running* one does,
+    # per the jobs table's partial unique index) — switch to a working
+    # client and confirm the retry isn't rejected as "already reindexing".
+    monkeypatch.setattr(cli_module, "OllamaEmbeddingClient", _FakeEmbeddingClient)
+    retry = runner.invoke(app, ["index", "demo"])
+    assert retry.exit_code == 0, retry.output
+
+
 def test_index_command_path_not_a_directory_errors_cleanly(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config.yaml").write_text(

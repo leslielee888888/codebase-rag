@@ -74,12 +74,25 @@ def _ensure_query_log_columns(conn: sqlite3.Connection) -> None:
     in place (existing rows get `answer = NULL`, `source = 'dashboard'`,
     same as the column defaults) the same way any other online migration
     would, guarded by a PRAGMA check since SQLite has no
-    `ADD COLUMN IF NOT EXISTS`."""
+    `ADD COLUMN IF NOT EXISTS`. Every `Store(...)` runs this check (the API
+    opens a fresh connection per request), so on a still-unmigrated DB two
+    near-simultaneous requests could both see the column missing and both
+    attempt the `ALTER TABLE` — the `OperationalError` that loses that race
+    is swallowed rather than raised, since the other request's identical
+    `ALTER TABLE` already did the job."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(query_log)").fetchall()}
     if "answer" not in cols:
-        conn.execute("ALTER TABLE query_log ADD COLUMN answer TEXT")
+        try:
+            conn.execute("ALTER TABLE query_log ADD COLUMN answer TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
     if "source" not in cols:
-        conn.execute("ALTER TABLE query_log ADD COLUMN source TEXT NOT NULL DEFAULT 'dashboard'")
+        try:
+            conn.execute("ALTER TABLE query_log ADD COLUMN source TEXT NOT NULL DEFAULT 'dashboard'")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
     conn.commit()
 
 

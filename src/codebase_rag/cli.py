@@ -20,7 +20,7 @@ from codebase_rag.chunking import chunk_repo
 from codebase_rag.config import Config, ConfigError, load_config
 from codebase_rag.embeddings import DEFAULT_MODEL, EmbeddingClient, OllamaEmbeddingClient
 from codebase_rag.generation import ClaudeGenerator, Generator, RetrievedChunk, Turn
-from codebase_rag.store import DEFAULT_DB_PATH, Store
+from codebase_rag.store import DEFAULT_DB_PATH, JobAlreadyRunningError, Store
 
 EMBED_BATCH_SIZE = 20
 # Caps how many prior turns go into the generation prompt (FR-6) — see
@@ -60,11 +60,32 @@ def index(
         typer.echo(f"'{entry.path}' isn't a directory - check config.yaml.")
         raise typer.Exit(code=1)
 
+    # Claims this repo in the same `jobs` table the dashboard's reindex
+    # endpoints use (T4) — so indexing from the CLI and reindexing from the
+    # dashboard can't race each other's unguarded writes to the same repo's
+    # chunks; whichever surface gets there first wins, the other sees the
+    # same "already reindexing" rejection either surface would give its own
+    # duplicate trigger.
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        try:
+            job_id = store.create_job(entry.name)
+        except JobAlreadyRunningError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+
+    def _fail(message: str) -> None:
+        with Store(DEFAULT_DB_PATH) as store:
+            store.finish_job(job_id, status="failed", error=message)
+        typer.echo(message)
+        raise typer.Exit(code=1)
+
     typer.echo(f"Chunking '{entry.name}' from {entry.path}...")
     chunks = chunk_repo(entry.name, root)
     if not chunks:
-        typer.echo("No indexable files found.")
-        raise typer.Exit(code=1)
+        _fail("No indexable files found.")
+    with Store(DEFAULT_DB_PATH) as store:
+        store.set_job_total(job_id, len(chunks))
     typer.echo(f"{len(chunks)} chunks. Embedding via Ollama ({DEFAULT_MODEL})...")
 
     # Embedded in batches, with a progress bar (FR-7) — the slow part is the
@@ -77,13 +98,14 @@ def index(
             for start in batches:
                 batch = chunks[start : start + EMBED_BATCH_SIZE]
                 embeddings.extend(client.embed([c.content for c in batch]))
+                with Store(DEFAULT_DB_PATH) as store:
+                    store.update_job_progress(job_id, len(embeddings))
     except Exception as exc:  # Ollama unreachable, model not pulled, etc.
-        typer.echo(f"Embedding failed: {exc}")
-        raise typer.Exit(code=1) from exc
+        _fail(f"Embedding failed: {exc}")
 
-    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with Store(DEFAULT_DB_PATH) as store:
         store.replace_repo_chunks(entry.name, chunks, embeddings)
+        store.finish_job(job_id, status="done")
 
     typer.echo(f"Indexed '{entry.name}': {len(chunks)} chunks -> {DEFAULT_DB_PATH}")
 

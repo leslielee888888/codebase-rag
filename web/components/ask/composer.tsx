@@ -24,7 +24,12 @@ export function Composer({ disabled, onSubmit }: ComposerProps) {
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    // `isComposing` (and the legacy keyCode 229 fallback some browsers still
+    // need) means this Enter is committing an IME composition candidate —
+    // e.g. typing Japanese/Chinese/Korean — not a request to submit. Without
+    // this guard, that Enter both commits the candidate *and* sends the
+    // half-typed question.
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
       event.preventDefault();
       submit();
     }

@@ -12,6 +12,7 @@ Run locally with `uvicorn codebase_rag.api:app --reload`, or via the
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,6 +28,12 @@ from codebase_rag.reindexing import run_reindex_job
 from codebase_rag.store import DEFAULT_DB_PATH, JobAlreadyRunningError, JobRow, Store
 
 app = FastAPI(title="codebase-rag dashboard API", version="0.1.0")
+
+# Guards config.yaml's read-modify-write in add_repo/remove_repo: a plain
+# in-process lock is enough for this single-user tool (one API process,
+# no multi-worker deployment) and avoids needing file-level locking for
+# a race that, here, only two of Leslie's own browser tabs could trigger.
+_config_lock = threading.Lock()
 
 # T7 surfaced this: the browser-facing dashboard (web/) calls this API
 # client-side (POST /query, GET /citation), which needs CORS regardless of
@@ -212,16 +219,17 @@ def add_repo(request: AddRepoRequest) -> RepoOut:
     """Add a repo entry already reachable on the NAS filesystem (FR-8a,
     T6) — a UI-editable equivalent of hand-editing config.yaml, not a
     file-upload feature; the content itself must already be there."""
-    try:
-        config = load_config()
-    except ConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with _config_lock:
+        try:
+            config = load_config()
+        except ConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if config.find(request.name) is not None:
-        raise HTTPException(status_code=409, detail=f"'{request.name}' is already configured.")
+        if config.find(request.name) is not None:
+            raise HTTPException(status_code=409, detail=f"'{request.name}' is already configured.")
 
-    updated = Config(repos=[*config.repos, RepoEntry(name=request.name, path=request.path)])
-    save_config(updated)
+        updated = Config(repos=[*config.repos, RepoEntry(name=request.name, path=request.path)])
+        save_config(updated)
 
     return RepoOut(name=request.name, path=request.path, indexed=False, last_indexed_at=None)
 
@@ -231,17 +239,32 @@ def remove_repo(repo: str) -> Response:
     """Remove a repo entry and delete its indexed chunks immediately
     (FR-8b, §10 Q9) — no lingering, unlisted-but-still-searchable content.
     The confirm-before-remove step (§10 Q13) is the frontend's job (T9);
-    this endpoint does exactly what it's asked, unconditionally."""
-    try:
-        config = load_config()
-    except ConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    this endpoint does exactly what it's asked, unconditionally — except
+    while a reindex is actively running for it (409): `run_reindex_job`
+    doesn't know the repo was removed out from under it, and would
+    silently re-insert chunks for a now-unlisted repo via
+    `replace_repo_chunks` on its next successful completion. Cancel the
+    reindex (or wait for it to finish) first."""
+    if DEFAULT_DB_PATH.exists():
+        with Store(DEFAULT_DB_PATH) as store:
+            job = store.latest_job_for_repo(repo)
+        if job is not None and job.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail=f"'{repo}' is currently reindexing — cancel the reindex before removing it.",
+            )
 
-    if config.find(repo) is None:
-        raise HTTPException(status_code=404, detail=f"'{repo}' isn't in config.yaml.")
+    with _config_lock:
+        try:
+            config = load_config()
+        except ConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    updated = Config(repos=[r for r in config.repos if r.name != repo])
-    save_config(updated)
+        if config.find(repo) is None:
+            raise HTTPException(status_code=404, detail=f"'{repo}' isn't in config.yaml.")
+
+        updated = Config(repos=[r for r in config.repos if r.name != repo])
+        save_config(updated)
 
     if DEFAULT_DB_PATH.exists():
         with Store(DEFAULT_DB_PATH) as store:

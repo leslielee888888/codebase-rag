@@ -67,6 +67,21 @@ describe("RepoRow", () => {
     expect(screen.getByRole("button", { name: /reindex/i })).toBeInTheDocument();
   });
 
+  it("surfaces a real failure checking reindex status on mount, instead of silently rendering idle", async () => {
+    fetchReindexStatusMock.mockRejectedValue(new ApiError(502, "Couldn't reach the codebase-rag API."));
+    render(
+      <table>
+        <tbody>
+          <RepoRow repo={unindexedRepo} onReindexed={vi.fn()} onRemoved={vi.fn()} pollIntervalMs={POLL_MS} />
+        </tbody>
+      </table>,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't reach the codebase-rag API.");
+    // Still offers a way to retry, rather than a dead end.
+    expect(screen.getByRole("button", { name: /reindex/i })).toBeInTheDocument();
+  });
+
   it("FR-4: shows Indexed with a relative last-indexed time", async () => {
     fetchReindexStatusMock.mockRejectedValue(new ApiError(404, "No reindex job found."));
     render(

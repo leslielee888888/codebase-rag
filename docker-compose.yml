@@ -30,7 +30,7 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
     volumes:
-      - ./config.yaml:/app/config.yaml
+      - ./config.yaml:/app/config.yaml:ro
       # A repo config.yaml names must actually be readable inside the
       # container. Put (or bind-mount) each repo's checkout under
       # ./repos/<name> on the NAS share and point config.yaml at

@@ -1,5 +1,6 @@
 """Unit tests for store.py — a real temp-file SQLite DB, no network."""
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -181,8 +182,6 @@ def test_existing_query_log_rows_from_before_the_schema_migration_get_defaults(t
     3-column shape, before `answer`/`source` existed. Opening it with the
     current Store must migrate the table in place (§10 Q7) rather than
     erroring or losing the row."""
-    import sqlite3
-
     db_path = tmp_path / "index.db"
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -201,6 +200,76 @@ def test_existing_query_log_rows_from_before_the_schema_migration_get_defaults(t
         assert row.question == "a pre-migration question"
         assert row.answer is None
         assert row.source == "dashboard"  # the column default
+
+
+class _RacingConnection:
+    """Wraps a real sqlite3 connection to simulate the race
+    `_ensure_query_log_columns` has to survive: this connection's own
+    `PRAGMA table_info` always reports the target columns missing (as if it
+    hasn't observed a concurrent `ALTER TABLE` yet), but its own `ALTER
+    TABLE` raises exactly as SQLite would if another connection's identical
+    `ALTER TABLE` had already landed first."""
+
+    def __init__(self, real_conn):
+        self._real = real_conn
+
+    def execute(self, sql: str, params: tuple = ()):
+        if sql.strip().upper().startswith("PRAGMA TABLE_INFO"):
+            return _EmptyCursor()
+        if "ALTER TABLE query_log ADD COLUMN" in sql:
+            raise sqlite3.OperationalError("duplicate column name: answer")
+        return self._real.execute(sql, params)
+
+    def commit(self) -> None:
+        self._real.commit()
+
+
+class _EmptyCursor:
+    def fetchall(self):
+        return []  # as if query_log had no columns at all — forces both branches
+
+
+def test_query_log_migration_survives_a_concurrent_alter_from_another_connection(tmp_path: Path):
+    """Two Store(...) constructions racing on a still-unmigrated NAS DB
+    (the API opens a fresh connection per request, T5) must not crash if
+    both see the column missing and both attempt the same ALTER TABLE —
+    only one wins, and the loser's OperationalError is swallowed."""
+    from codebase_rag.store import _ensure_query_log_columns
+
+    db_path = tmp_path / "index.db"
+    real_conn = sqlite3.connect(db_path)
+    real_conn.execute(
+        "CREATE TABLE query_log (id INTEGER PRIMARY KEY AUTOINCREMENT, asked_at TEXT NOT NULL, "
+        "question TEXT NOT NULL, repos TEXT NOT NULL, num_results INTEGER NOT NULL, latency_ms INTEGER NOT NULL)"
+    )
+    real_conn.commit()
+
+    # Must not raise, despite every ALTER TABLE call "failing" as a duplicate.
+    _ensure_query_log_columns(_RacingConnection(real_conn))
+
+
+class _UnrelatedFailureConnection:
+    """Always reports the target columns missing, but the ALTER TABLE
+    fails for a genuinely unrelated reason (not the "another connection
+    already migrated it" race) — this must still propagate, not be
+    swallowed alongside the race case."""
+
+    def execute(self, sql: str, params: tuple = ()):
+        if sql.strip().upper().startswith("PRAGMA TABLE_INFO"):
+            return _EmptyCursor()
+        if "ALTER TABLE query_log ADD COLUMN" in sql:
+            raise sqlite3.OperationalError("database is locked")
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+    def commit(self) -> None:
+        pass
+
+
+def test_query_log_migration_reraises_an_unrelated_operational_error(tmp_path: Path):
+    from codebase_rag.store import _ensure_query_log_columns
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        _ensure_query_log_columns(_UnrelatedFailureConnection())
 
 
 def test_cosine_with_precomputed_norm_matches_computing_it_internally():

@@ -555,6 +555,37 @@ def test_remove_repo_never_indexed_still_removes_the_config_entry(tmp_path: Path
     assert client.get("/repos").json()["repos"] == []
 
 
+def test_remove_repo_rejects_removal_while_a_reindex_is_running(tmp_path: Path, monkeypatch):
+    """A running job doesn't know its repo was removed out from under it -
+    it would call replace_repo_chunks and silently re-insert chunks for a
+    now-unlisted repo. Removal must be rejected until the job settles."""
+    monkeypatch.chdir(tmp_path)
+    _configure_repo(tmp_path, name="demo")
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        store.create_job("demo")
+
+    result = client.delete("/repos/demo")
+
+    assert result.status_code == 409
+    assert "currently reindexing" in result.json()["detail"]
+    # and the config entry must genuinely still be there
+    assert [r["name"] for r in client.get("/repos").json()["repos"]] == ["demo"]
+
+
+def test_remove_repo_succeeds_once_the_reindex_has_settled(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _configure_repo(tmp_path, name="demo")
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        job_id = store.create_job("demo")
+        store.finish_job(job_id, status="done")
+
+    result = client.delete("/repos/demo")
+
+    assert result.status_code == 204
+
+
 def test_repos_lists_configured_repos_with_indexed_state_and_timestamp(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _index_one_repo(tmp_path, monkeypatch, repo="demo")

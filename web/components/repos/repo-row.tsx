@@ -81,10 +81,20 @@ export function RepoRow({ repo, onReindexed, onRemoved, pollIntervalMs = POLL_IN
           // just happen in this session.
           setState({ phase: "idle" });
         }
-      } catch {
+      } catch (error) {
         if (!mountedRef.current || myRequestId !== requestIdRef.current) return;
-        // No job has ever run for this repo (404) — plain idle, not an error.
-        setState({ phase: "idle" });
+        if (error instanceof ApiError && error.status === 404) {
+          // No job has ever run for this repo — plain idle, not an error.
+          setState({ phase: "idle" });
+        } else {
+          // A real failure (network down, the API erroring) must not be
+          // silently treated the same as "nothing to report" — this row
+          // would otherwise render as idle/reindexable while masking an
+          // actual outage.
+          const message =
+            error instanceof ApiError ? error.message : "Couldn't check this repo's reindex status.";
+          setState({ phase: "error", message });
+        }
       }
     })();
     // Only check once on mount for this repo.
