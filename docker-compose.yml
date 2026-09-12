@@ -1,19 +1,27 @@
-# codebase-rag — NAS deployment (T10).
+# codebase-rag — NAS deployment (T10, v1; api/web added in T11, v2 dashboard).
 #
-#   Bring up Ollama (once, stays running):  docker compose up -d ollama
+#   Bring up the long-running services:      docker compose up -d
 #   Run the CLI (per invocation, exits when done — it's a CLI, not a server, §7).
 #   Note: the image's ENTRYPOINT is already `codebase-rag` — don't repeat it:
 #     docker compose run --rm app index <repo>
 #     docker compose run --rm app query "..."
 #     docker compose run --rm app chat
-#   Update:   docker compose pull && docker compose up -d ollama
-#   Logs:     docker compose logs -f ollama
+#   Dashboard: http://<nas-lan-ip>:3000 — the `web` container's own port is
+#   the only one of the two new services published to the LAN; `web` reaches
+#   `api` over the compose network by service name (see web/Dockerfile,
+#   web/next.config.ts) — `api` itself is never LAN-exposed.
+#   Update:   docker compose pull && docker compose up -d
+#   Logs:     docker compose logs -f <service>
 #   Rollback: set IMAGE_TAG in .env to the previous release, then re-pull
 #
-# CI publishes the image to GHCR on every `v*` tag (.github/workflows/image.yml).
-# The NAS never builds — it pulls. Indexed data lives in the `codebase-rag-data`
-# named volume (SQLite, §10 Q3) and survives every `run`/`pull`/restart.
-# `ollama-models` similarly persists the pulled embedding model.
+# CI publishes both images to GHCR on every `v*` tag (.github/workflows/image.yml):
+# ghcr.io/leslielee888888/codebase-rag (app/api, one Python image, split by
+# entrypoint override below) and ghcr.io/leslielee888888/codebase-rag-web
+# (the Next.js dashboard, built from web/). The NAS never builds — it pulls.
+# Indexed data lives in the `codebase-rag-data` named volume (SQLite, §10 Q3)
+# and survives every `run`/`pull`/restart — `app` and `api` share it, since
+# both read/write the same index. `ollama-models` similarly persists the
+# pulled embedding model.
 services:
   app:
     image: ghcr.io/leslielee888888/codebase-rag:${IMAGE_TAG:-latest}
@@ -22,7 +30,7 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
+      - ./config.yaml:/app/config.yaml
       # A repo config.yaml names must actually be readable inside the
       # container. Put (or bind-mount) each repo's checkout under
       # ./repos/<name> on the NAS share and point config.yaml at
@@ -34,6 +42,35 @@ services:
     # No `restart:` policy, deliberately: this is a CLI, so `up -d` on this
     # service would run it once (Typer prints help, exits 0), then loop
     # forever restarting. Invoke it with `run --rm` (see above), not `up`.
+
+  # The dashboard's backend (v2 PRD, T1-T6/T11) — the same image as `app`,
+  # its entrypoint overridden to run the FastAPI service instead of the CLI.
+  # config.yaml is read-write here (not `:ro`, unlike `app`): FR-8's
+  # add/remove-repo endpoints (T6) write it directly.
+  api:
+    image: ghcr.io/leslielee888888/codebase-rag:${IMAGE_TAG:-latest}
+    entrypoint: ["codebase-rag-api"]
+    env_file:
+      - .env
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./repos:/repos:ro
+      - codebase-rag-data:/app/data
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  # The dashboard's frontend (v2 PRD, T7-T11). The only one of these two new
+  # services published to the LAN.
+  web:
+    image: ghcr.io/leslielee888888/codebase-rag-web:${IMAGE_TAG:-latest}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
 
   ollama:
     image: ollama/ollama:latest
