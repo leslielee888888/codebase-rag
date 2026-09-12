@@ -35,3 +35,15 @@ export function formatRelativeTime(iso: string, now: number = Date.now()): strin
   }
   return rtf.format(Math.round(duration), "year");
 }
+
+/**
+ * Human-readable label for a logged query's `source` (FR-7). `"cli"` and
+ * `"dashboard"` are the two sources the API currently logs; anything else
+ * (a future source) still renders sensibly rather than needing a code
+ * change here.
+ */
+export function formatSourceLabel(source: string): string {
+  if (source === "cli") return "CLI";
+  if (source === "dashboard") return "Dashboard";
+  return source;
+}

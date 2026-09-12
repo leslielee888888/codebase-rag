@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatRelativeTime } from "./format";
+import { formatRelativeTime, formatSourceLabel } from "./format";
 
 const NOW = new Date("2026-09-12T12:00:00Z").getTime();
 
@@ -18,5 +18,19 @@ describe("formatRelativeTime", () => {
 
   it("falls back to months once it's more than 30 days old", () => {
     expect(formatRelativeTime("2026-07-01T12:00:00Z", NOW)).toBe("2 months ago");
+  });
+});
+
+describe("formatSourceLabel", () => {
+  it("labels the dashboard source", () => {
+    expect(formatSourceLabel("dashboard")).toBe("Dashboard");
+  });
+
+  it("labels the cli source", () => {
+    expect(formatSourceLabel("cli")).toBe("CLI");
+  });
+
+  it("passes through an unrecognized source rather than hiding it", () => {
+    expect(formatSourceLabel("api")).toBe("api");
   });
 });

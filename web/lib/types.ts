@@ -44,3 +44,27 @@ export interface JobOut {
   cancel_requested: boolean;
   error: string | null;
 }
+
+/**
+ * Mirrors the API's `GET /stats` response (FR-7/T5). A key is only present
+ * in `queries_this_week_by_source` if at least one query with that source
+ * has been logged this week — don't assume `"dashboard"`/`"cli"` both exist.
+ */
+export interface Stats {
+  queries_this_week: number;
+  queries_this_week_by_source: Record<string, number>;
+}
+
+/**
+ * Mirrors the API's `GET /history` entry shape (FR-7/T5, `query_log` table).
+ * `answer` is `null` for a pre-migration legacy row (§10 Q7) logged before
+ * the `answer`/`source` columns existed.
+ */
+export interface HistoryEntry {
+  id: number;
+  asked_at: string;
+  question: string;
+  answer: string | null;
+  source: string;
+  repos: string[];
+}
