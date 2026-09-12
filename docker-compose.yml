@@ -67,7 +67,7 @@ services:
   web:
     image: ghcr.io/leslielee888888/codebase-rag-web:${IMAGE_TAG:-latest}
     ports:
-      - "3000:3000"
+      - "${WEB_PORT:-3000}:3000"
     depends_on:
       - api
     restart: unless-stopped
