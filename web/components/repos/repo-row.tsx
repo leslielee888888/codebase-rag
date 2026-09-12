@@ -38,21 +38,39 @@ export function RepoRow({ repo, onReindexed, onRemoved, pollIntervalMs = POLL_IN
   const [state, setState] = useState<RowState>({ phase: "checking" });
   const mountedRef = useRef(true);
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped by every explicit action (trigger/cancel) and read by every
+  // in-flight async response before it applies its result. Without this, a
+  // poll already scheduled (or already in flight) when the user clicks
+  // Cancel can land its response *after* cancel's own response and silently
+  // overwrite it — a real race, not just a test-timing artifact: nothing
+  // upstream of `mountedRef` distinguishes "stale" from "current" among
+  // several in-flight requests for the same row. `schedulePoll` captures
+  // the *current* id (continuing the same logical operation); trigger/
+  // cancel each mint a *new* one (starting a new one), which is what
+  // invalidates anything still in flight from before.
+  const requestIdRef = useRef(0);
+
+  function clearScheduledPoll() {
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+  }
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
+      clearScheduledPoll();
     };
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
+    const myRequestId = ++requestIdRef.current;
     (async () => {
       try {
         const job = await fetchReindexStatus(repo.name);
-        if (cancelled || !mountedRef.current) return;
+        if (!mountedRef.current || myRequestId !== requestIdRef.current) return;
         if (job.status === "running") {
           setState(job.cancel_requested ? { phase: "cancelling", job } : { phase: "running", job });
           schedulePoll();
@@ -64,27 +82,25 @@ export function RepoRow({ repo, onReindexed, onRemoved, pollIntervalMs = POLL_IN
           setState({ phase: "idle" });
         }
       } catch {
-        if (cancelled || !mountedRef.current) return;
+        if (!mountedRef.current || myRequestId !== requestIdRef.current) return;
         // No job has ever run for this repo (404) — plain idle, not an error.
         setState({ phase: "idle" });
       }
     })();
-    return () => {
-      cancelled = true;
-    };
     // Only check once on mount for this repo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo.name]);
 
   function schedulePoll() {
-    if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
-    pollTimeoutRef.current = setTimeout(poll, pollIntervalMs);
+    clearScheduledPoll();
+    const myRequestId = requestIdRef.current;
+    pollTimeoutRef.current = setTimeout(() => poll(myRequestId), pollIntervalMs);
   }
 
-  async function poll() {
+  async function poll(myRequestId: number) {
     try {
       const job = await fetchReindexStatus(repo.name);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || myRequestId !== requestIdRef.current) return;
       if (job.status === "running") {
         setState(job.cancel_requested ? { phase: "cancelling", job } : { phase: "running", job });
         schedulePoll();
@@ -93,7 +109,7 @@ export function RepoRow({ repo, onReindexed, onRemoved, pollIntervalMs = POLL_IN
         onReindexed();
       }
     } catch (error) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || myRequestId !== requestIdRef.current) return;
       const message =
         error instanceof ApiError ? error.message : "Lost track of this reindex job.";
       setState({ phase: "error", message });
@@ -101,14 +117,16 @@ export function RepoRow({ repo, onReindexed, onRemoved, pollIntervalMs = POLL_IN
   }
 
   async function handleTrigger() {
+    clearScheduledPoll();
+    const myRequestId = ++requestIdRef.current;
     setState({ phase: "starting" });
     try {
       const job = await triggerReindex(repo.name);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || myRequestId !== requestIdRef.current) return;
       setState({ phase: "running", job });
       schedulePoll();
     } catch (error) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || myRequestId !== requestIdRef.current) return;
       const message =
         error instanceof ApiError ? error.message : "Couldn't start a reindex.";
       setState({ phase: "error", message });
@@ -117,10 +135,12 @@ export function RepoRow({ repo, onReindexed, onRemoved, pollIntervalMs = POLL_IN
 
   async function handleCancel() {
     if (state.phase !== "running") return;
+    clearScheduledPoll();
+    const myRequestId = ++requestIdRef.current;
     setState({ phase: "cancelling", job: state.job });
     try {
       const job = await cancelReindex(repo.name);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || myRequestId !== requestIdRef.current) return;
       if (job.status === "running") {
         setState({ phase: "cancelling", job });
         schedulePoll();
@@ -129,7 +149,7 @@ export function RepoRow({ repo, onReindexed, onRemoved, pollIntervalMs = POLL_IN
         onReindexed();
       }
     } catch (error) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || myRequestId !== requestIdRef.current) return;
       // A 409 here just means it wasn't actually running any more (e.g. it
       // finished between polls) — surface the message, but don't treat it
       // as fatal: fall back to idle so the row is usable again.

@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { fireEvent } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RepoRow } from "./repo-row";
 import { ApiError } from "@/lib/api";
 import type { RepoInfo } from "@/lib/types";
@@ -41,6 +41,17 @@ const unindexedRepo: RepoInfo = {
 const POLL_MS = 15;
 
 describe("RepoRow", () => {
+  beforeEach(() => {
+    // Each mock's queued/default return values must not leak between tests
+    // — a later test's un-configured call (e.g. a background poll firing
+    // after the test's own assertions) would otherwise silently resolve
+    // with a PRIOR test's leftover mock value instead of failing loudly.
+    fetchReindexStatusMock.mockReset();
+    triggerReindexMock.mockReset();
+    cancelReindexMock.mockReset();
+    removeRepoMock.mockReset();
+  });
+
   it("FR-4: shows Not indexed for a repo that's never been reindexed", async () => {
     fetchReindexStatusMock.mockRejectedValue(new ApiError(404, "No reindex job found for 'ai-docs'."));
     render(
