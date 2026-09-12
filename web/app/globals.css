@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+/*
+ * Terminal-adjacent dark theme (PRD §7/§8) — a single committed look, not
+ * tied to the viewer's OS light/dark preference, so these are the only
+ * color definitions the app needs.
+ */
+@theme {
+  --color-canvas: #0e1210;
+  --color-surface: #161b18;
+  --color-well: #0a0d0b;
+  --color-line: #232b26;
+  --color-line-strong: #34403a;
+  --color-ink: #e9ede9;
+  --color-muted: #92a099;
+  --color-faint: #5b6862;
+  --color-accent: #e8a33d;
+  --color-success: #5fcf8e;
+  --color-error: #e5646b;
+
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+}

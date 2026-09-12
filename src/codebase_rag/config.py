@@ -87,3 +87,12 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             )
         repos.append(RepoEntry(name=entry["name"], path=entry["path"]))
     return Config(repos=repos)
+
+
+def save_config(config: Config, path: Path = DEFAULT_CONFIG_PATH) -> None:
+    """Writes `path` in the same shape `load_config` reads. The dashboard's
+    add/remove-repo endpoints (FR-8, T6) use this as the UI-editable
+    equivalent of hand-editing config.yaml — repos stays the single source
+    of truth for "what's configured" either way."""
+    data = {"repos": [{"name": r.name, "path": r.path} for r in config.repos]}
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")

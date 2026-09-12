@@ -6,7 +6,10 @@ front of you.
 
 See the [PRD](https://github.com/leslielee888888/ai-docs/blob/main/docs/prd/codebase-rag-assistant.md)
 for the full spec, and the [explainer](https://claude.ai/code/artifact/dcf9164b-9532-4eef-917a-a4f909633c27)
-for a one-page summary.
+for a one-page summary. A browser dashboard on top of this same CLI — same
+questions, same index, a UI instead of SSH — is the
+[v2 PRD](https://github.com/leslielee888888/ai-docs/blob/main/docs/prd/codebase-rag-dashboard.md);
+see `web/README.md` for that half of the project.
 
 ## Usage
 
@@ -49,7 +52,7 @@ assuming something else is wrong.
 ```sh
 cp .env.example .env                 # fill in IMAGE_TAG and CLAUDE_CODE_OAUTH_TOKEN
 cp config.example.yaml config.yaml   # fill in real repo paths — see that file for the /repos/<name> convention
-docker compose up -d ollama
+docker compose up -d               # ollama, api, and web — the long-running services
 docker compose exec ollama ollama pull qwen3-embedding:0.6b   # first bring-up only
 docker compose run --rm app index <repo-name>
 docker compose run --rm app query "how does X work?" --repo <repo-name>
@@ -61,8 +64,19 @@ these commands (`docker compose run --rm app codebase-rag index ...` fails
 with "No such command 'codebase-rag'").
 
 `app` has no `restart:` policy on purpose — it's a CLI, invoked per command
-with `docker compose run --rm`, not a long-running server (§7). Only `ollama`
-stays up.
+with `docker compose run --rm`, not a long-running server (§7). `ollama`,
+`api`, and `web` stay up.
+
+### Dashboard (v2 PRD)
+
+`docker compose up -d` also brings up the web dashboard — everything the CLI
+does, in a browser, on the LAN: **`http://<nas-lan-ip>:3000`**. `api` (the
+FastAPI backend, T1-T6) is deliberately *not* published to the LAN — `web`
+reaches it over the compose network by service name, so only `web`'s port
+needs to be reachable. `api` shares `app`'s image (entrypoint override) and
+the same `codebase-rag-data` volume, so the CLI and the dashboard read/write
+one index either way — indexing from the CLI shows up in the dashboard and
+vice versa, no separate step.
 
 If GHCR is unreachable, see `docker-compose.build.yml` for a local-build
 fallback (`docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`).

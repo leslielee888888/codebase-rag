@@ -9,27 +9,23 @@ the query log.
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import typer
 
+from codebase_rag import answering
 from codebase_rag.chunking import chunk_repo
 from codebase_rag.config import Config, ConfigError, load_config
 from codebase_rag.embeddings import DEFAULT_MODEL, EmbeddingClient, OllamaEmbeddingClient
 from codebase_rag.generation import ClaudeGenerator, Generator, RetrievedChunk, Turn
-from codebase_rag.store import DEFAULT_DB_PATH, Store
+from codebase_rag.store import DEFAULT_DB_PATH, JobAlreadyRunningError, Store
 
-TOP_K = 8
 EMBED_BATCH_SIZE = 20
-# Caps how many prior turns go into the generation prompt (FR-6). Without
-# this, build_prompt() resends the whole conversation every turn — prompt
-# size grows O(n) per turn and cumulative tokens sent over an n-turn session
-# grow O(n^2). Retrieval already only ever looks at the single most recent
-# turn (see embed_text below), so this only bounds the generation side.
-MAX_CHAT_HISTORY_TURNS = 6
+# Caps how many prior turns go into the generation prompt (FR-6) — see
+# answering.MAX_CHAT_HISTORY_TURNS, which _answer() actually enforces.
+MAX_CHAT_HISTORY_TURNS = answering.MAX_CHAT_HISTORY_TURNS
 
 app = typer.Typer(
     name="codebase-rag",
@@ -64,11 +60,32 @@ def index(
         typer.echo(f"'{entry.path}' isn't a directory - check config.yaml.")
         raise typer.Exit(code=1)
 
+    # Claims this repo in the same `jobs` table the dashboard's reindex
+    # endpoints use (T4) — so indexing from the CLI and reindexing from the
+    # dashboard can't race each other's unguarded writes to the same repo's
+    # chunks; whichever surface gets there first wins, the other sees the
+    # same "already reindexing" rejection either surface would give its own
+    # duplicate trigger.
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with Store(DEFAULT_DB_PATH) as store:
+        try:
+            job_id = store.create_job(entry.name)
+        except JobAlreadyRunningError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(code=1) from exc
+
+    def _fail(message: str) -> None:
+        with Store(DEFAULT_DB_PATH) as store:
+            store.finish_job(job_id, status="failed", error=message)
+        typer.echo(message)
+        raise typer.Exit(code=1)
+
     typer.echo(f"Chunking '{entry.name}' from {entry.path}...")
     chunks = chunk_repo(entry.name, root)
     if not chunks:
-        typer.echo("No indexable files found.")
-        raise typer.Exit(code=1)
+        _fail("No indexable files found.")
+    with Store(DEFAULT_DB_PATH) as store:
+        store.set_job_total(job_id, len(chunks))
     typer.echo(f"{len(chunks)} chunks. Embedding via Ollama ({DEFAULT_MODEL})...")
 
     # Embedded in batches, with a progress bar (FR-7) — the slow part is the
@@ -81,76 +98,52 @@ def index(
             for start in batches:
                 batch = chunks[start : start + EMBED_BATCH_SIZE]
                 embeddings.extend(client.embed([c.content for c in batch]))
+                with Store(DEFAULT_DB_PATH) as store:
+                    store.update_job_progress(job_id, len(embeddings))
     except Exception as exc:  # Ollama unreachable, model not pulled, etc.
-        typer.echo(f"Embedding failed: {exc}")
-        raise typer.Exit(code=1) from exc
+        _fail(f"Embedding failed: {exc}")
 
-    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with Store(DEFAULT_DB_PATH) as store:
         store.replace_repo_chunks(entry.name, chunks, embeddings)
+        store.finish_job(job_id, status="done")
 
     typer.echo(f"Indexed '{entry.name}': {len(chunks)} chunks -> {DEFAULT_DB_PATH}")
 
 
 def _resolve_scope(repos: Optional[list[str]]) -> list[str]:
     config = _load_config()
-    scope = repos or config.repo_names()
-    if not scope:
-        typer.echo("No repos configured yet - run 'codebase-rag index <repo>' first.")
-        raise typer.Exit(code=1)
-    return scope
+    try:
+        return answering.resolve_scope(repos, config.repo_names())
+    except answering.NothingIndexedError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
 
 
 def _answer(question: str, scope: list[str], history: Optional[list[Turn]] = None) -> tuple[str, list[RetrievedChunk]]:
-    """Shared retrieve-then-generate path for `query` and `chat` (FR-2, FR-5, FR-6)."""
-    if not DEFAULT_DB_PATH.exists():
-        typer.echo("Nothing indexed yet - run 'codebase-rag index <repo>' first.")
-        raise typer.Exit(code=1)
-
-    started_at = time.monotonic()
+    """Shared retrieve-then-generate path for `query` and `chat` (FR-2, FR-5, FR-6) —
+    delegates the pipeline itself to `answering.answer_question` (reused by the
+    v2 dashboard's API, §10 Q1), translating its typed errors into the CLI's
+    echo-and-exit UX."""
     embed_client: EmbeddingClient = OllamaEmbeddingClient()
-    # A follow-up's retrieval considers the prior turn too (FR-6) — "what
-    # about the edge cases?" alone wouldn't retrieve anything useful.
-    embed_text = question
-    if history:
-        last_question, last_answer = history[-1]
-        embed_text = f"{last_question}\n{last_answer}\n{question}"
+    generator: Generator = ClaudeGenerator()
     try:
-        [query_vector] = embed_client.embed([embed_text])
-    except Exception as exc:
+        result = answering.answer_question(question, scope, history, embed_client, generator, source="cli")
+    except answering.EmbeddingFailedError as exc:
         typer.echo(f"Embedding failed: {exc}")
         raise typer.Exit(code=1) from exc
-
-    with Store(DEFAULT_DB_PATH) as store:
-        known = set(store.indexed_repos())
-        unindexed = [r for r in scope if r not in known]
-        if unindexed:
-            typer.echo(f"Not indexed yet: {unindexed}. Run 'codebase-rag index <repo>' for each first.")
-            raise typer.Exit(code=1)
-        rows = store.search(query_vector, repos=scope, top_k=TOP_K)
-
-    if not rows:
-        typer.echo("No indexed content matched - nothing to answer from.")
-        raise typer.Exit(code=1)
-
-    chunks = [
-        RetrievedChunk(similarity=sim, repo=repo, file_path=path, start_line=start, end_line=end, content=content)
-        for sim, repo, path, start, end, content in rows
-    ]
-
-    generator: Generator = ClaudeGenerator()
-    capped_history = history[-MAX_CHAT_HISTORY_TURNS:] if history else history
-    try:
-        answer = generator.generate(question, chunks, capped_history)
-    except Exception as exc:
+    except answering.UnindexedRepoError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+    except answering.GenerationFailedError as exc:
         typer.echo(f"Generation failed: {exc}")
         raise typer.Exit(code=1) from exc
+    except answering.AnsweringError as exc:
+        # NothingIndexedError / NoMatchError — both are plain, complete
+        # messages on their own (see answering.py).
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
 
-    latency_ms = round((time.monotonic() - started_at) * 1000)
-    with Store(DEFAULT_DB_PATH) as store:
-        store.log_query(question, scope, num_results=len(chunks), latency_ms=latency_ms)
-
-    return answer, chunks
+    return result.answer, result.chunks
 
 
 def _print_answer(answer: str, chunks: list[RetrievedChunk], show: Optional[list[int]] = None) -> None:

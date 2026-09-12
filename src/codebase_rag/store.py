@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from array import array
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,10 +39,90 @@ CREATE TABLE IF NOT EXISTS query_log (
     question TEXT NOT NULL,
     repos TEXT NOT NULL,
     num_results INTEGER NOT NULL,
-    latency_ms INTEGER NOT NULL
+    latency_ms INTEGER NOT NULL,
+    answer TEXT,
+    source TEXT NOT NULL DEFAULT 'dashboard'
 );
 CREATE INDEX IF NOT EXISTS idx_query_log_asked_at ON query_log(asked_at);
+
+-- Background reindex jobs (T4 of the v2 dashboard PRD, FR-5). The partial
+-- unique index is what makes "reject a duplicate trigger" (§10 Q11) an
+-- atomic, race-free DB constraint rather than an app-level check-then-insert:
+-- a second INSERT for a repo that already has a 'running' row fails with
+-- sqlite3.IntegrityError, which create_job() turns into JobAlreadyRunningError.
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    status TEXT NOT NULL,  -- 'running' | 'done' | 'failed' | 'cancelled'
+    total_chunks INTEGER,
+    embedded_chunks INTEGER NOT NULL DEFAULT 0,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_repo ON jobs(repo, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_running_per_repo ON jobs(repo) WHERE status = 'running';
 """
+
+
+def _ensure_query_log_columns(conn: sqlite3.Connection) -> None:
+    """T5 of the dashboard PRD (§10 Q7) added `answer` and `source` to
+    `query_log` after it had already shipped in v1. `CREATE TABLE IF NOT
+    EXISTS` above only creates the up-to-date shape for a brand-new DB — an
+    existing NAS DB's `query_log` predates these columns, so this adds them
+    in place (existing rows get `answer = NULL`, `source = 'dashboard'`,
+    same as the column defaults) the same way any other online migration
+    would, guarded by a PRAGMA check since SQLite has no
+    `ADD COLUMN IF NOT EXISTS`. Every `Store(...)` runs this check (the API
+    opens a fresh connection per request), so on a still-unmigrated DB two
+    near-simultaneous requests could both see the column missing and both
+    attempt the `ALTER TABLE` — the `OperationalError` that loses that race
+    is swallowed rather than raised, since the other request's identical
+    `ALTER TABLE` already did the job."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(query_log)").fetchall()}
+    if "answer" not in cols:
+        try:
+            conn.execute("ALTER TABLE query_log ADD COLUMN answer TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
+    if "source" not in cols:
+        try:
+            conn.execute("ALTER TABLE query_log ADD COLUMN source TEXT NOT NULL DEFAULT 'dashboard'")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
+    conn.commit()
+
+
+class JobAlreadyRunningError(ValueError):
+    """A reindex job is already running for this repo (§10 Q11)."""
+
+
+@dataclass(frozen=True)
+class QueryLogRow:
+    id: int
+    asked_at: str
+    question: str
+    repos: list[str]
+    answer: str | None
+    source: str
+    num_results: int
+    latency_ms: int
+
+
+@dataclass(frozen=True)
+class JobRow:
+    id: int
+    repo: str
+    status: str
+    total_chunks: int | None
+    embedded_chunks: int
+    cancel_requested: bool
+    error: str | None
+    started_at: str
+    finished_at: str | None
 
 
 def _to_blob(vector: list[float]) -> bytes:
@@ -74,6 +155,7 @@ class Store:
         self._conn = sqlite3.connect(path)
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        _ensure_query_log_columns(self._conn)
 
     def close(self) -> None:
         self._conn.close()
@@ -105,9 +187,39 @@ class Store:
                 ],
             )
 
+    def get_chunk(self, repo: str, file_path: str, start_line: int, end_line: int) -> str | None:
+        """Look up one chunk's exact content by its citation coordinates
+        (T2 of the dashboard PRD, FR-3) — re-fetches the snippet behind a
+        citation the query endpoint already returned, without carrying full
+        chunk content in every query response. Returns None if no chunk
+        matches (e.g. the repo was reindexed since the citation was given,
+        and its boundaries shifted)."""
+        row = self._conn.execute(
+            "SELECT content FROM chunks WHERE repo = ? AND file_path = ? AND start_line = ? AND end_line = ?",
+            (repo, file_path, start_line, end_line),
+        ).fetchone()
+        return row[0] if row else None
+
+    def delete_repo_chunks(self, repo: str) -> None:
+        """Delete `repo`'s indexed chunks with no replacement (FR-8b, T6) —
+        unlike `replace_repo_chunks`, there's no fresh set to insert after:
+        removing a repo entry deletes its chunks immediately (§10 Q9), no
+        lingering, unlisted-but-still-searchable content."""
+        with self._conn:
+            self._conn.execute("DELETE FROM chunks WHERE repo = ?", (repo,))
+
     def indexed_repos(self) -> list[str]:
         rows = self._conn.execute("SELECT DISTINCT repo FROM chunks ORDER BY repo").fetchall()
         return [r[0] for r in rows]
+
+    def repo_status(self) -> dict[str, str]:
+        """Every indexed repo's most recent `indexed_at` (ISO 8601), as a
+        repo -> timestamp mapping (T3 of the dashboard PRD, FR-4). Every
+        chunk from one `replace_repo_chunks` call shares the same
+        `indexed_at`, so `MAX` here is just "this repo's last reindex",
+        not an aggregate over meaningfully different values."""
+        rows = self._conn.execute("SELECT repo, MAX(indexed_at) FROM chunks GROUP BY repo").fetchall()
+        return {repo: indexed_at for repo, indexed_at in rows}
 
     def search(
         self, query_vector: list[float], repos: list[str] | None = None, top_k: int = 8
@@ -141,14 +253,32 @@ class Store:
         scored.sort(key=lambda row: row[0], reverse=True)
         return scored[:top_k]
 
-    def log_query(self, question: str, repos: list[str], num_results: int, latency_ms: int) -> None:
-        """Record one query (§5/§9) — every query, its scope, result count, and
-        latency, so 'queries/week' is a count over this table, not separate
-        instrumentation."""
+    def log_query(
+        self,
+        question: str,
+        repos: list[str],
+        num_results: int,
+        latency_ms: int,
+        answer: str | None = None,
+        source: str = "dashboard",
+    ) -> None:
+        """Record one query (§5/§9) — every query, its scope, result count,
+        latency, its actual answer, and which surface asked it (T5, §10 Q7:
+        `answer` backs "click a past question, see its real answer"
+        (FR-7); `source` backs the dashboard-vs-CLI split in §5)."""
         with self._conn:
             self._conn.execute(
-                "INSERT INTO query_log (asked_at, question, repos, num_results, latency_ms) VALUES (?, ?, ?, ?, ?)",
-                (datetime.now(timezone.utc).isoformat(), question, ",".join(repos), num_results, latency_ms),
+                "INSERT INTO query_log (asked_at, question, repos, num_results, latency_ms, answer, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    question,
+                    ",".join(repos),
+                    num_results,
+                    latency_ms,
+                    answer,
+                    source,
+                ),
             )
 
     def queries_since(self, since: datetime) -> int:
@@ -158,3 +288,100 @@ class Store:
             "SELECT COUNT(*) FROM query_log WHERE asked_at >= ?", (since.isoformat(),)
         ).fetchone()
         return count
+
+    def queries_since_by_source(self, since: datetime) -> dict[str, int]:
+        """Same count as `queries_since`, split by `source` (§5's
+        dashboard-vs-CLI metric, T5)."""
+        rows = self._conn.execute(
+            "SELECT source, COUNT(*) FROM query_log WHERE asked_at >= ? GROUP BY source", (since.isoformat(),)
+        ).fetchall()
+        return dict(rows)
+
+    def recent_queries(self, limit: int = 20) -> list[QueryLogRow]:
+        """The most recent queries, newest first, each carrying its own
+        answer (FR-7, T5) — a click on one is just displaying data already
+        fetched, no second lookup needed."""
+        rows = self._conn.execute(
+            "SELECT id, asked_at, question, repos, answer, source, num_results, latency_ms "
+            "FROM query_log ORDER BY asked_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            QueryLogRow(
+                id=id_,
+                asked_at=asked_at,
+                question=question,
+                repos=repos.split(",") if repos else [],
+                answer=answer,
+                source=source,
+                num_results=num_results,
+                latency_ms=latency_ms,
+            )
+            for id_, asked_at, question, repos, answer, source, num_results, latency_ms in rows
+        ]
+
+    def create_job(self, repo: str) -> int:
+        """Start tracking a new reindex job for `repo`. Raises
+        `JobAlreadyRunningError` if one is already running for it — see the
+        schema's partial unique index above for why this can't race."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._conn:
+                cursor = self._conn.execute(
+                    "INSERT INTO jobs (repo, status, embedded_chunks, cancel_requested, started_at) "
+                    "VALUES (?, 'running', 0, 0, ?)",
+                    (repo, now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise JobAlreadyRunningError(f"'{repo}' is already reindexing.") from exc
+        return cursor.lastrowid
+
+    def set_job_total(self, job_id: int, total_chunks: int) -> None:
+        with self._conn:
+            self._conn.execute("UPDATE jobs SET total_chunks = ? WHERE id = ?", (total_chunks, job_id))
+
+    def update_job_progress(self, job_id: int, embedded_chunks: int) -> None:
+        with self._conn:
+            self._conn.execute("UPDATE jobs SET embedded_chunks = ? WHERE id = ?", (embedded_chunks, job_id))
+
+    def request_job_cancel(self, job_id: int) -> None:
+        """Flag a running job to stop at its next checkpoint (§10 Q12). A
+        no-op if the job isn't running (already finished, or doesn't exist)."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE jobs SET cancel_requested = 1 WHERE id = ? AND status = 'running'", (job_id,)
+            )
+
+    def is_job_cancel_requested(self, job_id: int) -> bool:
+        row = self._conn.execute("SELECT cancel_requested FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return bool(row and row[0])
+
+    def finish_job(self, job_id: int, status: str, error: str | None = None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn:
+            self._conn.execute(
+                "UPDATE jobs SET status = ?, error = ?, finished_at = ? WHERE id = ?",
+                (status, error, now, job_id),
+            )
+
+    _JOB_COLUMNS = (
+        "id, repo, status, total_chunks, embedded_chunks, cancel_requested, error, started_at, finished_at"
+    )
+
+    def _row_to_job(self, row: tuple) -> JobRow:
+        id_, repo, status, total, embedded, cancel_requested, error, started_at, finished_at = row
+        return JobRow(id_, repo, status, total, embedded, bool(cancel_requested), error, started_at, finished_at)
+
+    def get_job(self, job_id: int) -> JobRow | None:
+        row = self._conn.execute(f"SELECT {self._JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def latest_job_for_repo(self, repo: str) -> JobRow | None:
+        """The most recently created job for `repo`, if any — since only one
+        job can ever be 'running' for a repo at a time (the schema's partial
+        unique index), this is also the currently-running one whenever one
+        exists."""
+        row = self._conn.execute(
+            f"SELECT {self._JOB_COLUMNS} FROM jobs WHERE repo = ? ORDER BY id DESC LIMIT 1", (repo,)
+        ).fetchone()
+        return self._row_to_job(row) if row else None

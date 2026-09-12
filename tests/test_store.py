@@ -1,10 +1,13 @@
 """Unit tests for store.py — a real temp-file SQLite DB, no network."""
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from codebase_rag.chunking import Chunk
-from codebase_rag.store import Store, _cosine
+from codebase_rag.store import JobAlreadyRunningError, Store, _cosine
 
 
 def _chunk(repo: str, file_path: str, content: str) -> Chunk:
@@ -36,6 +39,23 @@ def test_search_respects_repo_scope(tmp_path: Path):
         assert {row[1] for row in scoped} == {"repo-a"}
 
 
+def test_delete_repo_chunks_removes_only_that_repos_chunks(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.replace_repo_chunks("repo-a", [_chunk("repo-a", "x.py", "x")], [[1.0]])
+        store.replace_repo_chunks("repo-b", [_chunk("repo-b", "y.py", "y")], [[1.0]])
+
+        store.delete_repo_chunks("repo-a")
+
+        assert store.indexed_repos() == ["repo-b"]
+
+
+def test_delete_repo_chunks_on_an_unindexed_repo_is_a_harmless_no_op(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.delete_repo_chunks("never-indexed")  # must not raise
+
+        assert store.indexed_repos() == []
+
+
 def test_replace_repo_chunks_drops_stale_entries(tmp_path: Path):
     with Store(tmp_path / "index.db") as store:
         store.replace_repo_chunks("demo", [_chunk("demo", "old.py", "old")], [[1.0, 0.0]])
@@ -47,12 +67,58 @@ def test_replace_repo_chunks_drops_stale_entries(tmp_path: Path):
         assert {row[2] for row in results} == {"new.py"}
 
 
+def test_get_chunk_returns_content_for_exact_coordinates(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.replace_repo_chunks("demo", [_chunk("demo", "a.py", "alpha")], [[1.0, 0.0]])
+
+        content = store.get_chunk("demo", "a.py", start_line=1, end_line=1)
+
+        assert content == "alpha"
+
+
+def test_get_chunk_returns_none_when_no_chunk_matches(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.replace_repo_chunks("demo", [_chunk("demo", "a.py", "alpha")], [[1.0, 0.0]])
+
+        # wrong repo, wrong file, and a stale line range all miss cleanly
+        assert store.get_chunk("other", "a.py", 1, 1) is None
+        assert store.get_chunk("demo", "b.py", 1, 1) is None
+        assert store.get_chunk("demo", "a.py", 5, 9) is None
+
+
 def test_indexed_repos_lists_distinct_repos(tmp_path: Path):
     with Store(tmp_path / "index.db") as store:
         store.replace_repo_chunks("repo-a", [_chunk("repo-a", "x.py", "x")], [[1.0]])
         store.replace_repo_chunks("repo-b", [_chunk("repo-b", "y.py", "y")], [[1.0]])
 
         assert store.indexed_repos() == ["repo-a", "repo-b"]
+
+
+def test_repo_status_maps_each_repo_to_its_last_indexed_at(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.replace_repo_chunks("repo-a", [_chunk("repo-a", "x.py", "x")], [[1.0]])
+        store.replace_repo_chunks("repo-b", [_chunk("repo-b", "y.py", "y")], [[1.0]])
+
+        status = store.repo_status()
+
+        assert set(status.keys()) == {"repo-a", "repo-b"}
+        assert all(isinstance(ts, str) and ts for ts in status.values())
+
+
+def test_repo_status_reflects_a_reindex_not_the_original_index_time(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.replace_repo_chunks("demo", [_chunk("demo", "a.py", "v1")], [[1.0]])
+        first = store.repo_status()["demo"]
+
+        store.replace_repo_chunks("demo", [_chunk("demo", "a.py", "v2")], [[1.0]])
+        second = store.repo_status()["demo"]
+
+        assert second >= first  # ISO 8601 timestamps sort lexicographically
+
+
+def test_repo_status_is_empty_when_nothing_is_indexed(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        assert store.repo_status() == {}
 
 
 def test_log_query_and_queries_since_count_recent_queries(tmp_path: Path):
@@ -66,6 +132,144 @@ def test_log_query_and_queries_since_count_recent_queries(tmp_path: Path):
         # nothing should count as "since" a moment in the future
         future = store.queries_since(datetime.now(timezone.utc) + timedelta(days=1))
         assert future == 0
+
+
+def test_log_query_defaults_source_to_dashboard_when_unspecified(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.log_query("anything", ["demo"], num_results=1, latency_ms=10)
+
+        [logged] = store.recent_queries(limit=1)
+        assert logged.source == "dashboard"
+        assert logged.answer is None
+
+
+def test_log_query_records_the_answer_and_source(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.log_query(
+            "how does X work?", ["demo"], num_results=3, latency_ms=120, answer="X works by...", source="cli"
+        )
+
+        [logged] = store.recent_queries(limit=1)
+        assert logged.question == "how does X work?"
+        assert logged.answer == "X works by..."
+        assert logged.source == "cli"
+        assert logged.repos == ["demo"]
+
+
+def test_recent_queries_returns_newest_first_and_respects_limit(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        for i in range(5):
+            store.log_query(f"question {i}", ["demo"], num_results=1, latency_ms=1, source="dashboard")
+
+        recent = store.recent_queries(limit=2)
+
+        assert [r.question for r in recent] == ["question 4", "question 3"]
+
+
+def test_queries_since_by_source_splits_the_count(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.log_query("q1", ["demo"], num_results=1, latency_ms=1, source="dashboard")
+        store.log_query("q2", ["demo"], num_results=1, latency_ms=1, source="dashboard")
+        store.log_query("q3", ["demo"], num_results=1, latency_ms=1, source="cli")
+
+        counts = store.queries_since_by_source(datetime.now(timezone.utc) - timedelta(days=7))
+
+        assert counts == {"dashboard": 2, "cli": 1}
+
+
+def test_existing_query_log_rows_from_before_the_schema_migration_get_defaults(tmp_path: Path):
+    """Simulates a pre-T5 NAS DB: a query_log row inserted against the old
+    3-column shape, before `answer`/`source` existed. Opening it with the
+    current Store must migrate the table in place (§10 Q7) rather than
+    erroring or losing the row."""
+    db_path = tmp_path / "index.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE query_log (id INTEGER PRIMARY KEY AUTOINCREMENT, asked_at TEXT NOT NULL, "
+        "question TEXT NOT NULL, repos TEXT NOT NULL, num_results INTEGER NOT NULL, latency_ms INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO query_log (asked_at, question, repos, num_results, latency_ms) VALUES (?, ?, ?, ?, ?)",
+        (datetime.now(timezone.utc).isoformat(), "a pre-migration question", "demo", 1, 10),
+    )
+    conn.commit()
+    conn.close()
+
+    with Store(db_path) as store:
+        [row] = store.recent_queries(limit=1)
+        assert row.question == "a pre-migration question"
+        assert row.answer is None
+        assert row.source == "dashboard"  # the column default
+
+
+class _RacingConnection:
+    """Wraps a real sqlite3 connection to simulate the race
+    `_ensure_query_log_columns` has to survive: this connection's own
+    `PRAGMA table_info` always reports the target columns missing (as if it
+    hasn't observed a concurrent `ALTER TABLE` yet), but its own `ALTER
+    TABLE` raises exactly as SQLite would if another connection's identical
+    `ALTER TABLE` had already landed first."""
+
+    def __init__(self, real_conn):
+        self._real = real_conn
+
+    def execute(self, sql: str, params: tuple = ()):
+        if sql.strip().upper().startswith("PRAGMA TABLE_INFO"):
+            return _EmptyCursor()
+        if "ALTER TABLE query_log ADD COLUMN" in sql:
+            raise sqlite3.OperationalError("duplicate column name: answer")
+        return self._real.execute(sql, params)
+
+    def commit(self) -> None:
+        self._real.commit()
+
+
+class _EmptyCursor:
+    def fetchall(self):
+        return []  # as if query_log had no columns at all — forces both branches
+
+
+def test_query_log_migration_survives_a_concurrent_alter_from_another_connection(tmp_path: Path):
+    """Two Store(...) constructions racing on a still-unmigrated NAS DB
+    (the API opens a fresh connection per request, T5) must not crash if
+    both see the column missing and both attempt the same ALTER TABLE —
+    only one wins, and the loser's OperationalError is swallowed."""
+    from codebase_rag.store import _ensure_query_log_columns
+
+    db_path = tmp_path / "index.db"
+    real_conn = sqlite3.connect(db_path)
+    real_conn.execute(
+        "CREATE TABLE query_log (id INTEGER PRIMARY KEY AUTOINCREMENT, asked_at TEXT NOT NULL, "
+        "question TEXT NOT NULL, repos TEXT NOT NULL, num_results INTEGER NOT NULL, latency_ms INTEGER NOT NULL)"
+    )
+    real_conn.commit()
+
+    # Must not raise, despite every ALTER TABLE call "failing" as a duplicate.
+    _ensure_query_log_columns(_RacingConnection(real_conn))
+
+
+class _UnrelatedFailureConnection:
+    """Always reports the target columns missing, but the ALTER TABLE
+    fails for a genuinely unrelated reason (not the "another connection
+    already migrated it" race) — this must still propagate, not be
+    swallowed alongside the race case."""
+
+    def execute(self, sql: str, params: tuple = ()):
+        if sql.strip().upper().startswith("PRAGMA TABLE_INFO"):
+            return _EmptyCursor()
+        if "ALTER TABLE query_log ADD COLUMN" in sql:
+            raise sqlite3.OperationalError("database is locked")
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+    def commit(self) -> None:
+        pass
+
+
+def test_query_log_migration_reraises_an_unrelated_operational_error(tmp_path: Path):
+    from codebase_rag.store import _ensure_query_log_columns
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        _ensure_query_log_columns(_UnrelatedFailureConnection())
 
 
 def test_cosine_with_precomputed_norm_matches_computing_it_internally():
@@ -84,6 +288,114 @@ def test_cosine_zero_vector_returns_zero_not_a_division_error():
     assert _cosine([0.0, 0.0], [1.0, 1.0]) == 0.0
     assert _cosine([1.0, 1.0], [0.0, 0.0]) == 0.0
     assert _cosine([1.0, 1.0], [0.0, 0.0], norm_a=0.0) == 0.0
+
+
+def test_create_job_then_get_job_round_trips(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        job_id = store.create_job("demo")
+
+        job = store.get_job(job_id)
+
+        assert job.repo == "demo"
+        assert job.status == "running"
+        assert job.total_chunks is None
+        assert job.embedded_chunks == 0
+        assert job.cancel_requested is False
+        assert job.error is None
+        assert job.finished_at is None
+
+
+def test_create_job_rejects_a_second_running_job_for_the_same_repo(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.create_job("demo")
+
+        with pytest.raises(JobAlreadyRunningError, match="demo"):
+            store.create_job("demo")
+
+
+def test_create_job_allows_a_new_job_once_the_previous_one_finished(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        first = store.create_job("demo")
+        store.finish_job(first, status="done")
+
+        second = store.create_job("demo")  # must not raise
+
+        assert second != first
+
+
+def test_create_job_allows_concurrent_jobs_for_different_repos(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        store.create_job("repo-a")
+        store.create_job("repo-b")  # must not raise
+
+
+def test_set_job_total_and_update_job_progress(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        job_id = store.create_job("demo")
+        store.set_job_total(job_id, 42)
+        store.update_job_progress(job_id, 17)
+
+        job = store.get_job(job_id)
+
+        assert job.total_chunks == 42
+        assert job.embedded_chunks == 17
+
+
+def test_request_job_cancel_sets_the_flag_only_on_a_running_job(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        running = store.create_job("demo")
+        store.request_job_cancel(running)
+        assert store.is_job_cancel_requested(running) is True
+
+        finished = store.create_job("other")
+        store.finish_job(finished, status="done")
+        store.request_job_cancel(finished)  # no-op: not running
+        assert store.is_job_cancel_requested(finished) is False
+
+
+def test_finish_job_records_status_error_and_finished_at(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        job_id = store.create_job("demo")
+
+        store.finish_job(job_id, status="failed", error="Embedding failed: boom")
+
+        job = store.get_job(job_id)
+        assert job.status == "failed"
+        assert job.error == "Embedding failed: boom"
+        assert job.finished_at is not None
+
+
+def test_finish_job_frees_up_the_repo_for_a_new_job(tmp_path: Path):
+    """The partial unique index only guards 'running' rows - once a job is
+    finished, a new one for the same repo must be allowed (see also
+    test_create_job_allows_a_new_job_once_the_previous_one_finished, which
+    checks this from create_job's side)."""
+    with Store(tmp_path / "index.db") as store:
+        job_id = store.create_job("demo")
+        store.finish_job(job_id, status="cancelled")
+
+        store.create_job("demo")  # must not raise
+
+
+def test_latest_job_for_repo_returns_the_most_recent_one(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        first = store.create_job("demo")
+        store.finish_job(first, status="done")
+        second = store.create_job("demo")
+
+        latest = store.latest_job_for_repo("demo")
+
+        assert latest.id == second
+
+
+def test_latest_job_for_repo_returns_none_when_no_job_ever_ran(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        assert store.latest_job_for_repo("never-indexed") is None
+
+
+def test_get_job_returns_none_for_an_unknown_id(tmp_path: Path):
+    with Store(tmp_path / "index.db") as store:
+        assert store.get_job(999) is None
 
 
 def test_search_top_k_truncates_to_the_best_matches(tmp_path: Path):
