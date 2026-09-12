@@ -5,8 +5,10 @@ import {
   askQuestion,
   cancelReindex,
   fetchCitationSnippet,
+  fetchHistory,
   fetchReindexStatus,
   fetchRepos,
+  fetchStats,
   removeRepo,
   triggerReindex,
 } from "./api";
@@ -320,5 +322,86 @@ describe("fetchCitationSnippet", () => {
     await expect(
       fetchCitationSnippet({ repo: "r", file_path: "f", start_line: 1, end_line: 2 }),
     ).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("fetchStats", () => {
+  it("returns queries-this-week and its by-source split from GET /stats", async () => {
+    const stats = {
+      queries_this_week: 12,
+      queries_this_week_by_source: { dashboard: 9, cli: 3 },
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(stats));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchStats()).resolves.toEqual(stats);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/stats$/),
+      expect.objectContaining({ signal: undefined }),
+    );
+  });
+
+  it("doesn't assume every source key is present", async () => {
+    const stats = { queries_this_week: 3, queries_this_week_by_source: { dashboard: 3 } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(stats)));
+
+    await expect(fetchStats()).resolves.toEqual(stats);
+  });
+
+  it("throws an ApiError on failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ detail: "Something went wrong." }, 500)),
+    );
+
+    await expect(fetchStats()).rejects.toMatchObject({ status: 500 });
+  });
+});
+
+describe("fetchHistory", () => {
+  it("GETs /history with the default limit and returns the entries array", async () => {
+    const entries = [
+      {
+        id: 2,
+        asked_at: "2026-09-12T10:00:00Z",
+        question: "how does X work?",
+        answer: "It does X.",
+        source: "dashboard",
+        repos: ["codebase-rag"],
+      },
+      {
+        id: 1,
+        asked_at: "2026-09-01T00:00:00Z",
+        question: "a legacy question",
+        answer: null,
+        source: "cli",
+        repos: [],
+      },
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ entries }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchHistory()).resolves.toEqual(entries);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toContain("/history?limit=20");
+  });
+
+  it("passes a custom limit through", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ entries: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchHistory(5);
+
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toContain("/history?limit=5");
+  });
+
+  it("throws an ApiError on failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ detail: "Something went wrong." }, 500)),
+    );
+
+    await expect(fetchHistory()).rejects.toMatchObject({ status: 500 });
   });
 });

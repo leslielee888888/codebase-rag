@@ -1,5 +1,5 @@
 import { apiBase } from "./config";
-import type { JobOut, QueryResponse, RepoInfo, Turn } from "./types";
+import type { HistoryEntry, JobOut, QueryResponse, RepoInfo, Stats, Turn } from "./types";
 
 /**
  * Thrown for any non-2xx API response. `status` lets callers distinguish
@@ -192,4 +192,22 @@ export async function fetchCitationSnippet(
     { signal },
   );
   return data.content;
+}
+
+/** `GET /stats` (FR-7/T5) — queries logged this week, total and by source. */
+export async function fetchStats(signal?: AbortSignal): Promise<Stats> {
+  return requestJson<Stats>(`${apiBase()}/stats`, { signal });
+}
+
+/**
+ * `GET /history` (FR-7/T5) — the most recently logged queries, newest
+ * first, each carrying its own `answer` so revisiting one needs no second
+ * request. `limit` defaults to 20, matching the API's own default.
+ */
+export async function fetchHistory(limit = 20, signal?: AbortSignal): Promise<HistoryEntry[]> {
+  const data = await requestJson<{ entries: HistoryEntry[] }>(
+    `${apiBase()}/history?limit=${limit}`,
+    { signal },
+  );
+  return data.entries;
 }
