@@ -1,14 +1,24 @@
 # codebase-rag dashboard
 
-The web frontend for `codebase-rag` (v2 "Codebase RAG Dashboard" PRD,
-[`leslielee888888/codebase-rag#21`](https://github.com/leslielee888888/codebase-rag/issues/21)).
+The web frontend for `codebase-rag` — the
+[v2 "Codebase RAG Dashboard" PRD](https://github.com/leslielee888888/ai-docs/blob/main/docs/prd/codebase-rag-dashboard.md),
+tracked as [`leslielee888888/codebase-rag#25`](https://github.com/leslielee888888/codebase-rag/issues/25).
 Next.js (App Router) + TypeScript + Tailwind CSS, talking to the FastAPI
 backend in `src/codebase_rag/api.py`.
 
-This slice (T7) is the Ask/chat page — ask a question, see a grounded
-answer with clickable citations, scope it to one or more repos, and carry
-context across a follow-up. Repos and History in the sidebar are
-placeholders for T8/T10.
+Three pages:
+
+- **Ask** (`/`) — ask a question, see a grounded answer with clickable
+  citations, scope it to one or more repos, carry context across a
+  follow-up.
+- **Repos** (`/repos`) — every configured repo's indexed state and
+  last-indexed time; trigger/cancel a reindex with real progress; add or
+  remove a repo entry (removal asks for confirmation first).
+- **History** (`/history`) — queries this week (split dashboard vs. CLI),
+  and recent questions you can click to reveal their real stored answer.
+
+Deployed alongside the API on the NAS as its own Docker image — see the
+repo root `README.md`'s "NAS deployment" section and `Dockerfile` here.
 
 ## Run locally
 

@@ -6,7 +6,10 @@ front of you.
 
 See the [PRD](https://github.com/leslielee888888/ai-docs/blob/main/docs/prd/codebase-rag-assistant.md)
 for the full spec, and the [explainer](https://claude.ai/code/artifact/dcf9164b-9532-4eef-917a-a4f909633c27)
-for a one-page summary.
+for a one-page summary. A browser dashboard on top of this same CLI — same
+questions, same index, a UI instead of SSH — is the
+[v2 PRD](https://github.com/leslielee888888/ai-docs/blob/main/docs/prd/codebase-rag-dashboard.md);
+see `web/README.md` for that half of the project.
 
 ## Usage
 
